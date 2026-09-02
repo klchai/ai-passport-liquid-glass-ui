@@ -1,6 +1,11 @@
 build/
+build-device/
 sdkconfig
 sdkconfig.old
 managed_components/
 .vscode/
 .idea/
+.DS_Store
+.impeccable/
+__pycache__/
+*.pyc

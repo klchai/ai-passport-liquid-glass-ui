@@ -11,6 +11,7 @@
 #include "bsp_battery.h"
 #include "bsp_pins.h"      // 错误日志里要打印 BSP_LCD_* 引脚号
 #include "demo.h"
+#include "fap_screenshot.h"
 #include "ui_pixel.h"
 #include "lvgl.h"
 #include "esp_log.h"
@@ -19,6 +20,8 @@
 static const char *TAG = "main";
 
 static const demo_entry_t DEMOS[] = {
+    { "Glass System", demo_glass_system_enter, demo_glass_system_exit, demo_glass_system_key },
+    { "Motion Lab", demo_liquid_glass_enter, demo_liquid_glass_exit, demo_liquid_glass_key },
     { "Display", demo_display_enter, demo_display_exit, demo_display_key },
     { "Button",  demo_button_enter,  demo_button_exit,  demo_button_key  },
     { "Audio",   demo_audio_enter,   demo_audio_exit,   demo_audio_key   },
@@ -55,8 +58,8 @@ static void menu_build(void) {
 
     for (size_t i = 0; i < DEMO_COUNT; i++) {
         int x = 11 + (int)(i % 2) * 112;
-        int y = 52 + (int)(i / 2) * 47;
-        s_cards[i] = ui_pixel_panel_create(s_menu_scr, x, y, 102, 40, UI_PAPER);
+        int y = 48 + (int)(i / 2) * 37;
+        s_cards[i] = ui_pixel_panel_create(s_menu_scr, x, y, 102, 32, UI_PAPER);
         s_rows[i] = lv_label_create(s_cards[i]);
         lv_obj_set_style_text_font(s_rows[i], &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_align(s_rows[i], LV_TEXT_ALIGN_CENTER, 0);
@@ -124,16 +127,27 @@ void app_main(void) {
     bsp_display_backlight(100);
 
     // 其余外设单项失败不阻塞:菜单里标 [FAIL],其他项照常可测。
-    s_ok[0] = true;                                   // Display 已确认可用
-    s_ok[1] = (bsp_button_init(on_key, NULL) == ESP_OK);
-    s_ok[2] = (bsp_audio_init() == ESP_OK);
-    s_ok[3] = (bsp_battery_init() == ESP_OK);
-    s_ok[4] = true;                                    // 页面内按需初始化并显示错误
-    s_ok[5] = true;
-    s_ok[6] = true;
+    s_ok[0] = true;                                    // Liquid Glass UI 基建
+    s_ok[1] = true;                                    // 三卡动效实验页
+    s_ok[2] = true;                                    // Display 已确认可用
+    s_ok[3] = (bsp_button_init(on_key, NULL) == ESP_OK);
+    s_ok[4] = (bsp_audio_init() == ESP_OK);
+    s_ok[5] = (bsp_battery_init() == ESP_OK);
+    s_ok[6] = true;                                    // 页面内按需初始化并显示错误
+    s_ok[7] = true;
+    s_ok[8] = true;
 
-    if (bsp_lvgl_lock(1000)) { enter_menu(); bsp_lvgl_unlock(); }
+    // I2C 读取留在 app_main，不放进按键回调或 LVGL timer。
+    int battery_soc = s_ok[5] ? bsp_battery_soc() : -1;
+    demo_glass_system_set_battery(battery_soc);
+    demo_liquid_glass_set_battery(battery_soc);
+    if (bsp_lvgl_lock(1000)) {
+        s_active = 0;
+        DEMOS[s_active].enter();
+        bsp_lvgl_unlock();
+    }
+    fap_screenshot_start();
 
     ESP_LOGI(TAG, "就绪:Display=%d Button=%d Audio=%d Battery=%d",
-             s_ok[0], s_ok[1], s_ok[2], s_ok[3]);
+             s_ok[1], s_ok[2], s_ok[3], s_ok[4]);
 }

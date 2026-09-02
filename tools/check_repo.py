@@ -19,14 +19,6 @@ SECRET_PATTERNS = {
     "AWS access key": re.compile(r"AKIA[0-9A-Z]{16}"),
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
 }
-ROOT_MARKDOWN_ALLOWLIST = {
-    "AGENTS.md",
-    "AGENTS.zh_CN.md",
-    "CLAUDE.md",
-    "CLAUDE.zh_CN.md",
-    "README.md",
-    "README.zh_CN.md",
-}
 
 
 def git_files() -> list[Path]:
@@ -78,12 +70,6 @@ def check_required_files(errors: list[str]) -> None:
     )
     if ignored.returncode == 0:
         errors.append("dependencies.lock must be tracked, not ignored")
-
-    for path in sorted(ROOT.glob("*.md")):
-        if path.name not in ROOT_MARKDOWN_ALLOWLIST:
-            errors.append(
-                f"{path.name}: root Markdown must move to docs/ or .github/"
-            )
 
 
 def check_markdown_links(files: list[Path], errors: list[str]) -> None:

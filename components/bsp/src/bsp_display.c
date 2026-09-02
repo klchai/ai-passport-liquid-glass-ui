@@ -131,7 +131,9 @@ esp_err_t bsp_display_init(void) {
     esp_lcd_panel_disp_on_off(s_panel, true);                    // 0x29 DISPON
 
     backlight_init();
-    ESP_LOGI(TAG, "显示就绪 %dx%d", BSP_LCD_W, BSP_LCD_H);
+    ESP_LOGI(TAG, "显示就绪 %dx%d SPI=%dMHz mode=%d queue=%d",
+             BSP_LCD_W, BSP_LCD_H, BSP_LCD_PCLK_HZ / 1000000,
+             BSP_LCD_SPI_MODE, io_cfg.trans_queue_depth);
     return ESP_OK;
 }
 

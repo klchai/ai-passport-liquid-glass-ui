@@ -12,6 +12,14 @@ typedef struct {
 } demo_entry_t;
 
 // 各演示页(定义在各自的 .c 里)
+void demo_glass_system_enter(void); void demo_glass_system_exit(void);
+void demo_glass_system_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+void demo_glass_system_set_battery(int soc);
+
+void demo_liquid_glass_enter(void); void demo_liquid_glass_exit(void);
+void demo_liquid_glass_key(bsp_btn_t btn, bsp_btn_ev_t ev);
+void demo_liquid_glass_set_battery(int soc);
+
 void demo_display_enter(void); void demo_display_exit(void);
 void demo_display_key(bsp_btn_t btn, bsp_btn_ev_t ev);
 

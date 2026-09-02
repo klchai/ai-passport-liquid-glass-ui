@@ -8,6 +8,9 @@ Use this page to discover repository documentation. `authoritative` documents de
 
 | Document | Purpose | Status |
 | --- | --- | --- |
+| [../PRODUCT.md](../PRODUCT.md) | Durable product purpose, users, positioning, and constraints | authoritative |
+| [../DESIGN.md](../DESIGN.md) | Hardware-native Glass System design and runtime contract | authoritative |
+| [../design/liquid-glass/README.md](../design/liquid-glass/README.md) | Design-tool tokens, component inventory, and Figma structure | reference |
 | [README.md](README.md) | Project overview and capability contract | authoritative |
 | [CHANGELOG.md](CHANGELOG.md) | User-visible behavior, compatibility, and release history | authoritative |
 | [brand-and-product.md](brand-and-product.md) | Brand, positioning, official links, and product facts | authoritative |

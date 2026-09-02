@@ -10,6 +10,9 @@
 
 | 文档 | 类型 | 状态 | 说明 |
 | --- | --- | --- | --- |
+| [../PRODUCT.zh_CN.md](../PRODUCT.zh_CN.md) | 产品定义 | authoritative | 长期用户、目标、定位与约束 |
+| [../DESIGN.zh_CN.md](../DESIGN.zh_CN.md) | Glass System | authoritative | 硬件原生视觉、交互与 Runtime 契约 |
+| [../design/liquid-glass/README.zh_CN.md](../design/liquid-glass/README.zh_CN.md) | 设计工具 | 参考 | Tokens、组件清单与 Figma Library 结构 |
 | [CHANGELOG.zh_CN.md](./CHANGELOG.zh_CN.md) | 变更记录 | authoritative | 用户可见行为、兼容性与发布流程历史 |
 | [brand-and-product.zh_CN.md](./brand-and-product.zh_CN.md) | 品牌与产品说明 | authoritative | 品牌与产品定位、官方入口、开源与授权、产品规格引用 |
 | [contribution/README.zh_CN.md](./contribution/README.zh_CN.md) | 协作规范索引 | authoritative | 通用协作规范（文档规范、提交与 PR 约定） |

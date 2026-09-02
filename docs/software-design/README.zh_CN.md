@@ -20,6 +20,8 @@
 
 ## 现有文档索引
 
+- [AI Passport Glass System](../../DESIGN.zh_CN.md)：视觉分层、材质与动效语义、
+  三键焦点、组件、Runtime 质量、Showcase 与性能契约。
 - [AGENTS.md](../../AGENTS.md)：仓库权威 AI 规范的入口与索引。
 
 > 注：`docs/software-design` 用于容纳软件设计文档。协作规范见 `docs/contribution/`，工程规范和 CI 说明见 `docs/development/`，fork 工作流见 `docs/fork-guide.md`；这些入口均由 `AGENTS.md` 索引。

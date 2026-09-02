@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "states": [
+    "default",
+    "focused",
+    "pressed",
+    "selected",
+    "disabled",
+    "loading",
+    "error"
+  ],
+  "accessibilityModes": [
+    "standard",
+    "high-contrast",
+    "reduced-transparency",
+    "reduced-motion"
+  ],
+  "costContract": {
+    "requiredFields": [
+      "ramBytes",
+      "flashBytes",
+      "dirtyPixelsTypical",
+      "dirtyPixelsWorst",
+      "frameTimeTypicalUs",
+      "frameTimeWorstUs"
+    ],
+    "unmeasuredValue": "pending-device"
+  },
+  "components": [
+    { "id": "content-panel", "category": "surface", "status": "implemented", "api": "ui_glass_content_panel_create", "material": "opaque-content", "measurement": "pending-device" },
+    { "id": "glass-platter", "category": "surface", "status": "implemented", "api": "ui_glass_platter_create", "material": "interactive-glass", "measurement": "pending-device" },
+    { "id": "focus-lens", "category": "navigation", "status": "implemented", "api": "ui_glass_focus_lens_create", "material": "interactive-glass", "measurement": "pending-device" },
+    { "id": "list-row", "category": "content", "status": "implemented", "api": "ui_glass_row_create", "material": "opaque-content", "measurement": "pending-device" },
+    { "id": "toggle", "category": "control", "status": "implemented", "api": "ui_glass_toggle_create", "material": "opaque-content", "measurement": "pending-device" },
+    { "id": "slider", "category": "control", "status": "implemented", "api": "ui_glass_slider_create", "material": "opaque-content", "measurement": "pending-device" },
+    { "id": "button", "category": "control", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
+    { "id": "morph-menu", "category": "presentation", "status": "showcase", "api": "demo_glass_system", "material": "interactive-glass", "measurement": "pending-device" },
+    { "id": "dock", "category": "navigation", "status": "showcase", "api": "demo_glass_system", "material": "interactive-glass", "measurement": "pending-device" },
+    { "id": "top-bar", "category": "navigation", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
+    { "id": "icon-button", "category": "control", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
+    { "id": "segmented-control", "category": "control", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
+    { "id": "checkbox", "category": "control", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
+    { "id": "radio", "category": "control", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
+    { "id": "stepper", "category": "control", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
+    { "id": "status-chip", "category": "feedback", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
+    { "id": "progress", "category": "feedback", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
+    { "id": "gauge", "category": "content", "status": "planned", "measurement": "pending-device" },
+    { "id": "waveform", "category": "content", "status": "planned", "measurement": "pending-device" },
+    { "id": "popover", "category": "presentation", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
+    { "id": "sheet", "category": "presentation", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
+    { "id": "alert", "category": "presentation", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
+    { "id": "toast", "category": "presentation", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
+    { "id": "device-status", "category": "system", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" }
+  ]
+}

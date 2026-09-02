@@ -7,6 +7,22 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+typedef struct {
+    uint32_t sample_sequence;
+    uint32_t sample_duration_ms;
+    uint32_t updates_per_second_x10;
+    uint32_t submit_avg_ms_x10;
+    uint32_t submit_max_ms_x10;
+    uint32_t render_avg_ms_x10;
+    uint32_t flush_wait_avg_ms_x10;
+    uint32_t pixels_per_update;
+    uint32_t invalidation_requests_x10;
+    uint32_t invalidated_pixels_per_update;
+    uint32_t wire_min_ms_x10;
+    uint32_t dma_free_bytes;
+    uint32_t dma_largest_block_bytes;
+} bsp_display_perf_snapshot_t;
+
 // 初始化 SPI 总线、面板、厂商寄存器、背光 LEDC。成功后屏幕已上电但内容未定。
 esp_err_t bsp_display_init(void);
 
@@ -30,6 +46,11 @@ struct _lv_display_t;
 
 // 启动 LVGL 与其渲染任务,返回 lv_display_t*。失败返回 NULL。
 struct _lv_display_t *bsp_lvgl_init(void);
+
+// Copies the latest one-second LVGL/display sample. Returns false until the
+// first sample is complete. This is a snapshot API and never waits for a new
+// frame; callers may safely use it from UI timers or worker tasks.
+bool bsp_display_perf_get(bsp_display_perf_snapshot_t *snapshot);
 
 // LVGL 非线程安全:在【非 LVGL 任务】里操作任何 lv_* 对象前后必须加解锁。
 bool bsp_lvgl_lock(int timeout_ms);

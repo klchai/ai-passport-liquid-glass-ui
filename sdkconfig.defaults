@@ -36,6 +36,10 @@ CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_MEM_SIZE_KILOBYTES=24
 
 # --- 系统 ---
+# Liquid Glass 透明合成由 ESP32-C3 CPU 执行；使用 -O2，避免默认 -Og
+# 在逐像素混合路径上损失帧率。保留断言用于开发期失效定位。
+CONFIG_COMPILER_OPTIMIZATION_DEBUG=n
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
 CONFIG_FREERTOS_HZ=1000
 
 # --- Bluetooth LE / NimBLE ---

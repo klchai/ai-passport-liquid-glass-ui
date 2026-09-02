@@ -28,7 +28,28 @@ run_static_checks() {
         tests/test_ui_pixel_math.c main/ui_pixel_math.c \
         -o "${test_dir}/test_ui_pixel_math"
     "${test_dir}/test_ui_pixel_math"
-    python3 tests/test_verify_firmware.py
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_liquid_glass_motion.c main/liquid_glass_motion.c \
+        -o "${test_dir}/test_liquid_glass_motion"
+    "${test_dir}/test_liquid_glass_motion"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_liquid_glass_compositor_core.c \
+        main/liquid_glass_compositor_core.c main/liquid_glass_motion.c \
+        -o "${test_dir}/test_liquid_glass_compositor_core"
+    "${test_dir}/test_liquid_glass_compositor_core"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_ui_glass_optics.c main/ui_glass_optics.c \
+        -o "${test_dir}/test_ui_glass_optics"
+    "${test_dir}/test_ui_glass_optics"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_ui_glass_foundation.c \
+        main/ui_glass_theme.c main/ui_glass_focus.c \
+        main/ui_glass_motion.c main/ui_glass_quality.c \
+        main/ui_glass_optics.c \
+        -o "${test_dir}/test_ui_glass_foundation"
+    "${test_dir}/test_ui_glass_foundation"
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_capture_screen.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_verify_firmware.py
     rm -rf "${test_dir}"
     echo "Host tests: PASS"
 }

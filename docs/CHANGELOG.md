@@ -6,13 +6,87 @@
 
 ## Unreleased
 
+- Added the first reusable AI Passport Glass System foundation: portable design
+  tokens, four accessibility profiles, deterministic non-linear motion, one
+  continuous three-button focus model, full-bleed content canvases, semantic
+  solid groups, glass-control components, an adaptive display-quality runtime,
+  and a public BSP performance snapshot. The default on-device review is now
+  an eight-scene mobile-style
+  interaction and motion reel covering Player, Home, Focus, Controls, Devices,
+  Activity, Moments, and Appearance. UP is the invariant page key, while DOWN
+  and OK operate the active scene; the automatic tour traverses every scene and
+  yields on the first physical input. Toggle and Slider use glass thumbs with
+  interruptible non-linear motion, Segmented and Focus indicators retarget from
+  their sampled position, and the overlapping three-card deck remains a
+  separate Motion Lab instead of defining the framework's default layout. List,
+  settings, activity, and action scenes no longer repeat one large opaque
+  rounded card; wallpaper-aware depth now comes from their canvas and controls.
+  Capsule labels use optical baseline correction, segmented labels share the
+  selection geometry, Dock labels are vertically centered, and Slider labels
+  now sit above full-width tracks instead of colliding on one baseline. The unattended
+  loop now starts on Player, holds each page for seven seconds, and exercises
+  every scene's signature interaction at a readable one-second cadence,
+  including all Activity states and Appearance application. Screenshot capture
+  can record a timed sequence over one serial session, and diagnostic rendering
+  always composites from the screen root so opaque canvases cannot hide later
+  controls in captured PNGs.
+- Added an `optimize-embedded-display` skill that teaches AI agents to measure
+  MCU display pipelines, classify CPU, bus, DMA, invalidation, scheduling, and
+  scanout limits, then select common or conditional optimization techniques for
+  the actual animation. It includes a reusable technique catalog and a measured
+  AI Passport ESP32-C3/LVGL case study without presenting Liquid Glass-specific
+  constants or the experimental display overclock as universal defaults.
+- Added a hardware-adapted Liquid Glass review screen with Regular, Clear, and
+  High Contrast materials; three-ring precomputed edge optics; directional
+  specular sweeps; stable window morphing; delayed content materialization; and
+  button-triggered press, rim, and waveform feedback. The review now uses a
+  source-tracked native RGB565 wallpaper and more transparent Regular/Clear
+  fills so the material can be judged against real image detail. Pagination now
+  uses a persistent card-deck transition: every card stays visible while moving
+  between front, middle, and back ranks; the wrapping card follows one reversible
+  depth curve and exchanges its Z plane only at the overlap midpoint. The
+  rank-differentiated stack now uses a compact 10 px vertical rhythm and a
+  restrained 4 px width step, keeping all three layers legible without making
+  equivalent information cards look like different component sizes. Material and deck position are now independent: all three cards share one per-layer
+  transmittance, natural alpha composition darkens overlaps, and rank changes
+  only geometry, occlusion, content, and edge exposure. OK changes the material
+  mode for the whole deck. A one-shot review tour demonstrates every state after
+  boot and yields immediately to physical input; long OK still returns to the
+  existing diagnostic menu.
+- Added a low-memory `FAP_SCREENSHOT_V1` implementation and host capture tool so
+  the 240x320 RGB565 display can be captured over USB Serial/JTAG without a
+  full-screen RAM buffer.
+- Replaced three overlapping full-card alpha fills with one allocation-free
+  fused background renderer: exact RGB565 coverage-mask LUTs and a rounded-card
+  event sweep write the wallpaper and glass directly into LVGL's active draw
+  buffer, avoiding the decoded-image copy stage. Static three-ring rims,
+  directional highlights, and moving glints are fused as short scanline spans
+  instead of separate LVGL draw tasks. Card geometry now advances in one atomic
+  deck animation; a bounded 8x8 tile planner coalesces fill, optical edge, and
+  visible-content damage before invalidation, while content fades and pagination
+  geometry redraw only their real pixels. Exhaustive host tests cover all RGB565
+  colors, eight overlap states, fused edge/glint pixels, and no-miss dirty
+  planning. On the connected board, the representative card-cycle render
+  interval fell from about 87 ms to about 49 ms without changing the 640 ms
+  motion trajectory. The demo temporarily shortens LVGL's refresh period to
+  10 ms for denser motion sampling and restores the global 33 ms default on exit.
+- Reduced Liquid Glass animation latency on the connected board by using an
+  experimental 80 MHz LCD SPI clock, two 20-line DMA buffers, and the ESP-IDF
+  performance compiler profile. Static full-screen tint and readability layers
+  are now baked into the RGB565 wallpaper instead of alpha blended on every
+  redraw. Added periodic display-pipeline metrics that separate CPU rendering,
+  DMA wait, pixel traffic, and the theoretical SPI wire-time floor; this does
+  not claim tear-free output because the board exposes no panel TE signal.
 - Made mini-program BLE install compatibility a template-level invariant: fixed
   protected `cardid`/Recovery partitions, retained the five-second UP-key
   Recovery boot hook, and added CI validation for merged-image structure,
   partition MD5/ranges, the 3 MB app limit, and protected payload exclusion.
 - Documented a release-title convention for multi-app releases: name tags as `v<version>-<app-name>` (e.g. `v0.1.0-voice-keychain`) so the release title carries the version and the app, and confirm the title after the release is published so a release list is scannable by app.
 - Added a post-release follow-up workflow: an `issue-suggestions` skill for filing user feedback as issues against the upstream project, an `experience-pr` skill for submitting reusable development experience as a documentation PR, a `docs/experiences/` directory for per-entry experience files, and supporting `project-completion`, `file-issues`, and experience-index documents.
-- Simplified the tracked repository root: moved GitHub-recognized community documents into `.github/`, moved the changelog into `docs/`, updated every reference, and added a root-document allowlist to repository checks.
+- Simplified the tracked repository root by moving GitHub-recognized community
+  documents into `.github/`, moving the changelog into `docs/`, and updating
+  every reference. Root-level Markdown remains allowed when it is the natural
+  project-level location.
 - Repository-wide language policy: every maintained Markdown default `.md` file is English, Simplified Chinese uses a paired `.zh_CN.md`, and both provide language switches. Static checks reject missing peers, missing switches, and Chinese prose in English defaults.
 - Phase one of the AI development workflow: streamlined task-based context routing, unified local/CI validation, added PR checks and a template, and committed the dependency lock for reproducible builds.
 - PR review fixes: pinned GitHub Actions to full commit SHAs, split build/release jobs by least privilege, disabled persisted sync checkout credentials, added Feature Request and Usage Question forms, clarified private security-report fallback, and corrected stale README, CI-trigger, and branch descriptions.
