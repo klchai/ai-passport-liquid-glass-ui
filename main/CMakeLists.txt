@@ -1,6 +1,9 @@
 idf_component_register(
     SRCS "main.c"
-         "ui_pixel.c"
+         "showcase_scenes.c"
+         "usage_link.c"
+         "usage_model.c"
+         "font_digits_44.c"
          "ui_pixel_math.c"
          "ui_glass.c"
          "ui_glass_optics.c"
@@ -14,18 +17,8 @@ idf_component_register(
          "liquid_glass_compositor_core.c"
          "ui_glass_compositor.c"
          "fap_screenshot.c"
-         "demo_glass_system.c"
-         "demo_liquid_glass.c"
-         "demo_display.c"
-         "demo_button.c"
-         "demo_audio.c"
-         "demo_battery.c"
-         "demo_radio.c"
-         "demo_wifi.c"
-         "demo_ble.c"
-         "demo_low_power.c"
     INCLUDE_DIRS "."
-    REQUIRES bsp bt esp_driver_usb_serial_jtag esp_event esp_hw_support esp_netif
-             esp_timer esp_wifi lvgl nvs_flash
+    REQUIRES bsp bt esp_driver_usb_serial_jtag esp_hw_support esp_timer lvgl
+             nvs_flash
     EMBED_FILES "../assets/images/liquid_glass_wallpaper.rgb565"
 )

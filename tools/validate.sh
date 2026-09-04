@@ -48,6 +48,14 @@ run_static_checks() {
         main/ui_glass_optics.c \
         -o "${test_dir}/test_ui_glass_foundation"
     "${test_dir}/test_ui_glass_foundation"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_usage_model.c main/usage_model.c \
+        -o "${test_dir}/test_usage_model"
+    "${test_dir}/test_usage_model"
+    # The committed digit font must match what the generator produces from the
+    # checked-in TTF and SYMBOLS; a stale copy would silently draw empty boxes
+    # for any glyph added to SYMBOLS but not regenerated.
+    PYTHONDONTWRITEBYTECODE=1 python3 tools/gen_digit_font.py --check
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_capture_screen.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_verify_firmware.py
     rm -rf "${test_dir}"

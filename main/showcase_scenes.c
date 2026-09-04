@@ -1,26 +1,57 @@
-#include "demo.h"
+// main/showcase_scenes.c —— 十页应用：八个 Liquid Glass 展示场景 + Kaboo + Claude。
+//
+// 这是应用的全部 UI。八个展示场景演示交互原语；Kaboo / Claude 两页显示由
+// Mac 经 BLE 推来的实时数据（见 usage_link.c）。十页共用一个 runtime、一块
+// 屏幕、一套 header/footer chrome、一个 200ms 主定时器和同一个焦点/转场系统。
+//
+// 按键约定（十页统一，沿用展示场景的原则）：
+//   UP        下一页（唯一的全局翻页键）
+//   UP 双击    上一页
+//   DOWN      页内：移动焦点 / 切换页内状态（Kaboo 翻卡片）
+//   OK        执行当前焦点动作
+#include "dashboard.h"
 
 #include "ui_glass.h"
 #include "ui_glass_focus.h"
 #include "ui_glass_motion.h"
 #include "ui_glass_runtime.h"
 #include "ui_glass_widgets.h"
+#include "usage_link.h"
 
+#include "esp_timer.h"
 #include "lvgl.h"
+
+#include <inttypes.h>
+#include <stdio.h>
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
-#define SHOWCASE_PAGE_COUNT       8
+#define SHOWCASE_PAGE_COUNT      10
 #define SHOWCASE_SCENE_Y         44
 #define SHOWCASE_SCENE_HEIGHT   276
+// One master tick drives everything. 200ms is the GCD of every period below,
+// so independent counters never drift against each other.
+#define SHOWCASE_TICK_MS         200
 // The unattended reel is meant to be watched, not benchmarked. Seven seconds
 // leaves time to read the scene after its signature interactions have played.
 #define SHOWCASE_TOUR_PERIOD_MS 7000
 #define SHOWCASE_SCENE_STEP_MS  1000
 #define SHOWCASE_MAX_FOCUS        6
 
+// Kaboo 卡片轮换：8 秒够读完一个大数字连同费用（4 秒在真机上被反馈为翻太快）。
+// 用户手动翻卡后暂停自动轮换一段时间，避免刚看清就被翻走。
+#define KABOO_CARD_COUNT          3
+#define CARD_ROTATE_MS         8000
+#define CARD_MANUAL_HOLD_MS   10000
+// 数据源 TTL：超过这个时长就不再声称数字是"当前"值。
+#define SOURCE_TTL_SECONDS      900
+
+LV_FONT_DECLARE(font_digits_44);
+
+// 前八个是展示场景，保持原枚举顺序不变（页内状态表按枚举索引）；后两个是
+// 实时数据页。is_data_page() 依赖这个排列。
 typedef enum {
     SHOWCASE_BUTTONS = 0,
     SHOWCASE_SELECTION,
@@ -30,7 +61,14 @@ typedef enum {
     SHOWCASE_NAVIGATION,
     SHOWCASE_FEEDBACK,
     SHOWCASE_STATES,
+    PAGE_KABOO,
+    PAGE_CLAUDE,
 } showcase_page_t;
+
+static bool is_data_page(showcase_page_t page)
+{
+    return page >= PAGE_KABOO;
+}
 
 typedef struct {
     lv_obj_t *outgoing;
@@ -110,11 +148,19 @@ static const char *const PAGE_TITLES[SHOWCASE_PAGE_COUNT] = {
     "Home",
     "Activity",
     "Appearance",
+    "Kaboo",
+    "Claude",
 };
 
 // The public reel starts with the two strongest content-first scenes, then
 // unfolds the interaction patterns that power them. Stable enum identities let
-// component state survive a reordered presentation sequence.
+// component state survive a reordered presentation sequence. The two live-data
+// pages sit at the back of the book so the demonstration reel stays intact.
+//
+// Footer width was measured against this order: the widest neighbour pair is
+// "Activity / Appearance" on Moments at 187px inside the 212px platter.
+// "Appearance" never sits beside "Moments", so the two longest names never
+// share a row. Reordering requires re-measuring.
 static const showcase_page_t PAGE_ORDER[SHOWCASE_PAGE_COUNT] = {
     SHOWCASE_OVERLAYS,
     SHOWCASE_NAVIGATION,
@@ -124,36 +170,57 @@ static const showcase_page_t PAGE_ORDER[SHOWCASE_PAGE_COUNT] = {
     SHOWCASE_FEEDBACK,
     SHOWCASE_BUTTONS,
     SHOWCASE_STATES,
-};
-
-static const char *const PAGE_SECONDARY_ACTION[SHOWCASE_PAGE_COUNT] = {
-    "MOVE", "MOVE", "MOVE", "MOVE",
-    "MENU", "NEXT", "STATE", "MOVE",
-};
-
-static const char *const PAGE_PRIMARY_ACTION[SHOWCASE_PAGE_COUNT] = {
-    "OPEN", "SET", "ADJUST", "OPEN",
-    "PLAY", "OPEN", "RUN", "APPLY",
+    PAGE_KABOO,
+    PAGE_CLAUDE,
 };
 
 static ui_glass_runtime_t s_runtime;
 static lv_obj_t *s_scene;
 static lv_obj_t *s_header_chrome;
 static lv_obj_t *s_header_title;
-static lv_obj_t *s_battery_label;
+static lv_obj_t *s_link_dot;        // BLE 链路指示：绿=已连接，灰=断开
+static lv_obj_t *s_battery_label;   // 右上角电量，规范默认要求显示
+static int s_battery_soc = -1;      // app_main 开机读一次；-1 = 不可用
 static lv_obj_t *s_footer;
 static lv_obj_t *s_footer_label;
-static lv_timer_t *s_tour_timer;
-static lv_timer_t *s_scene_timer;
+// 单一主定时器。原本的巡航 timer 与场景步进 timer 都并入它的计数器，
+// 消除了翻页时创建/销毁 timer 的竞争窗口。
+static lv_timer_t *s_tick_timer;
+static uint32_t s_tour_elapsed_ms;
+static uint32_t s_step_elapsed_ms;
+static bool s_tour_killed;          // 任何按键永久停止无人巡航
+static bool s_scene_done;           // 当前场景的步进演示已跑完
 static page_transition_t s_page_motion;
+
+// ---- 实时数据页（Kaboo / Claude）状态 ----
+
+static struct {
+    lv_obj_t *label;      // 窗口名（TODAY / 7 DAYS / 30 DAYS）
+    lv_obj_t *value;      // 大字 token 数
+    lv_obj_t *cost;
+    lv_obj_t *model;      // 模型 chip 文字
+    lv_obj_t *dots[KABOO_CARD_COUNT];
+    lv_obj_t *note;
+} s_kaboo_view;
+
+static struct {
+    lv_obj_t *five_value;
+    lv_obj_t *five_bar;
+    lv_obj_t *five_reset;
+    lv_obj_t *seven_value;
+    lv_obj_t *seven_bar;
+    lv_obj_t *seven_reset;
+    lv_obj_t *note;
+} s_claude_view;
+
+static uint8_t  s_kaboo_card;
+static uint32_t s_card_elapsed_ms;
+static uint32_t s_card_hold_ms;
 static focus_motion_t s_focus_motion;
 static morph_view_t s_morph;
 static showcase_page_t s_page;
 static bool s_transitioning;
-static uint8_t s_tour_steps;
 static uint8_t s_scene_step;
-static int s_battery_soc = -1;
-static int s_presented_battery_soc = -2;
 static segment_motion_t s_segment_motion;
 static lv_obj_t *s_player_state_label;
 static bool s_player_playing = true;
@@ -179,6 +246,7 @@ static navigation_view_t s_navigation;
 static void navigation_motion_set(void *value, int32_t progress);
 static void segment_motion_set(void *value, int32_t progress);
 static void focused_action(void);
+static void link_dot_refresh(void);
 
 static lv_obj_t *plain_object(lv_obj_t *parent, int x, int y,
                               int width, int height)
@@ -327,18 +395,15 @@ static lv_obj_t *reference_glass_create(lv_obj_t *parent,
     return surface;
 }
 
+// 两个"停止"现在只是翻标志：真正的 timer 是常驻的主定时器，不再随页创建销毁。
 static void stop_tour(void)
 {
-    if (!s_tour_timer) return;
-    lv_timer_delete(s_tour_timer);
-    s_tour_timer = NULL;
+    s_tour_killed = true;
 }
 
 static void stop_scene_timer(void)
 {
-    if (!s_scene_timer) return;
-    lv_timer_delete(s_scene_timer);
-    s_scene_timer = NULL;
+    s_scene_done = true;
 }
 
 static void focus_lens_set(void *value, int32_t progress)
@@ -365,6 +430,10 @@ static void stop_scene_activity(void)
     memset(&s_morph, 0, sizeof(s_morph));
     memset(&s_navigation, 0, sizeof(s_navigation));
     memset(&s_feedback, 0, sizeof(s_feedback));
+    // 数据页的 view 指针随 scene 一起失效。refresh_data_page 靠 is_data_page
+    // 门禁已经不会碰它们，清零是第二道保险，让任何越过门禁的路径都撞 NULL 而不是野指针。
+    memset(&s_kaboo_view, 0, sizeof(s_kaboo_view));
+    memset(&s_claude_view, 0, sizeof(s_claude_view));
     s_focus_lens = NULL;
     s_focus_count = 0;
     s_player_state_label = NULL;
@@ -917,9 +986,10 @@ static void build_overlays(lv_obj_t *root)
         solid_object(art, 108 + i * 14, 48 - height / 2,
                      5, height, 2, t->text, i == 2 ? 230 : 126);
     }
-    text_at(content, LV_SYMBOL_BLUETOOTH "  Passport Speaker", 18, 207,
+    // 两行状态文字上移 22px，让 "Connected" 收在导航条（scene-y 228）之上。
+    text_at(content, LV_SYMBOL_BLUETOOTH "  Passport Speaker", 18, 185,
             &lv_font_montserrat_14, t->text);
-    text_at(content, "Connected", 18, 229,
+    text_at(content, "Connected", 18, 207,
             &lv_font_montserrat_14, t->positive);
 
     s_morph.dimmer = solid_object(scene, 0, 0,
@@ -993,17 +1063,19 @@ static void navigation_content_create(lv_obj_t *panel,
     s_navigation.subtitle = text_at(s_navigation.content, "", 16, 47,
                                     &lv_font_montserrat_14, t->text_muted);
 
-    s_navigation.hero = solid_object(s_navigation.content, 14, 76, 184, 110,
-                                     28, 0x3B93C5, LV_OPA_COVER);
-    lv_obj_t *orb = solid_object(s_navigation.hero, 16, 20, 70, 70,
+    // hero 压到 84 高、orb 56：导航条常驻后底部只剩 228，dock 要坐在 168，
+    // hero 必须在 160 前收住，否则与 dock 叠画。
+    s_navigation.hero = solid_object(s_navigation.content, 14, 76, 184, 84,
+                                     24, 0x3B93C5, LV_OPA_COVER);
+    lv_obj_t *orb = solid_object(s_navigation.hero, 14, 14, 56, 56,
                                  LV_RADIUS_CIRCLE, t->text, 34);
     s_navigation.symbol = ui_glass_label(
         orb, "", &lv_font_montserrat_20, t->text);
     lv_obj_center(s_navigation.symbol);
     s_navigation.state_label = text_at(
-        s_navigation.hero, "", 104, 31, &lv_font_montserrat_14, t->text);
+        s_navigation.hero, "", 88, 22, &lv_font_montserrat_14, t->text);
     s_navigation.value_label = text_at(
-        s_navigation.hero, "", 104, 56, &lv_font_montserrat_14, t->text_muted);
+        s_navigation.hero, "", 88, 46, &lv_font_montserrat_14, t->text_muted);
 
     navigation_content_update(s_navigation_index);
 }
@@ -1120,10 +1192,12 @@ static void build_navigation(lv_obj_t *root)
     const ui_glass_theme_t *t = theme();
     s_navigation.panel = content_layer_create(root, 14, 6, 212, 252, t);
     navigation_content_create(s_navigation.panel, t);
+    // Dock 落在 168–224：hero 在 160 收住留 8px，footer 从 228 起留 4px。
+    // 两块玻璃不再叠画也不再贴脸。选中块只在 x 轴动画，y 固定，改这里就够了。
     s_navigation.dock_shadow = solid_object(
-        root, 16, 212, 208, 58, 30, 0x01070D, 44);
+        root, 16, 172, 208, 58, 30, 0x01070D, 44);
     s_navigation.dock = reference_glass_create(
-        root, 18, 208, 204, 56, 28, 144, 1, t, NULL);
+        root, 18, 168, 204, 56, 28, 144, 1, t, NULL);
     s_navigation.selection_shadow = solid_object(
         s_navigation.dock, 7 + s_navigation_index * 64, 7, 64, 46,
         23, 0x01070D, 28);
@@ -1255,6 +1329,322 @@ static lv_obj_t *scene_create(void)
     return scene;
 }
 
+// ---- 实时数据页：Kaboo / Claude ----
+//
+// 这两页是实时数据页。与展示场景共用 plain_object/solid_object/text_at
+// 与 theme()，但内容层用自己的 data_stage()：压暗层一路铺到屏幕底部并带向下
+// 淡出的渐变，让导航条坐在同一片材质上而不是压在边缘（真机验证过的效果）。
+
+static lv_obj_t *data_stage(lv_obj_t *root)
+{
+    const ui_glass_theme_t *t = theme();
+    // 96 与展示场景 Standard 模式一致；再高壁纸就成了一片死灰。
+    solid_object(root, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH,
+                 SHOWCASE_SCENE_HEIGHT, 0, t->content_surface, 96);
+    lv_obj_t *fade = solid_object(root, 0, 196, LIQUID_GLASS_COMPOSITOR_WIDTH,
+                                  SHOWCASE_SCENE_HEIGHT - 196, 0,
+                                  t->content_surface, LV_OPA_TRANSP);
+    lv_obj_set_style_bg_grad_color(fade, lv_color_hex(t->content_surface), 0);
+    lv_obj_set_style_bg_grad_dir(fade, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_main_opa(fade, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_grad_opa(fade, 96, 0);
+    lv_obj_set_style_bg_opa(fade, LV_OPA_COVER, 0);
+    return plain_object(root, 16, 4, 208, 204);
+}
+
+// token 计数压缩成 K/M/B，与 kaboo 自己的显示口径一致。
+static void format_tokens(char *buf, size_t cap, uint64_t tokens)
+{
+    if (tokens >= 1000000000ull) {
+        snprintf(buf, cap, "%llu.%lluB", tokens / 1000000000ull,
+                 (tokens % 1000000000ull) / 100000000ull);
+    } else if (tokens >= 1000000ull) {
+        snprintf(buf, cap, "%llu.%lluM", tokens / 1000000ull,
+                 (tokens % 1000000ull) / 100000ull);
+    } else if (tokens >= 1000ull) {
+        snprintf(buf, cap, "%llu.%lluK", tokens / 1000ull,
+                 (tokens % 1000ull) / 100ull);
+    } else {
+        snprintf(buf, cap, "%llu", tokens);
+    }
+}
+
+static void format_cost(char *buf, size_t cap, uint32_t cents)
+{
+    snprintf(buf, cap, "$%" PRIu32 ".%02" PRIu32, cents / 100u, cents % 100u);
+}
+
+// 距重置的剩余时间。窗口已翻篇时调用方不应走到这里。
+static void format_remaining(char *buf, size_t cap, uint32_t seconds)
+{
+    if (seconds >= 3600u) {
+        snprintf(buf, cap, "resets in %" PRIu32 "h %" PRIu32 "m",
+                 seconds / 3600u, (seconds % 3600u) / 60u);
+    } else {
+        snprintf(buf, cap, "resets in %" PRIu32 "m", seconds / 60u);
+    }
+}
+
+// 卡片下方的位置圆点：当前卡实心 accent，其余淡灰。
+static void build_dots(lv_obj_t *parent, int y, lv_obj_t **dots, int count,
+                       const ui_glass_theme_t *t)
+{
+    int span = count * 8 + (count - 1) * 14;
+    int x = (208 - span) / 2;
+    for (int i = 0; i < count; ++i) {
+        dots[i] = solid_object(parent, x + i * 22, y, 8, 8, LV_RADIUS_CIRCLE,
+                               t->text_muted, LV_OPA_40);
+    }
+}
+
+static void dots_select(lv_obj_t **dots, int count, int active,
+                        const ui_glass_theme_t *t)
+{
+    for (int i = 0; i < count; ++i) {
+        if (!dots[i]) continue;
+        bool on = (i == active);
+        lv_obj_set_style_bg_color(dots[i],
+                                  lv_color_hex(on ? t->accent : t->text_muted), 0);
+        lv_obj_set_style_bg_opa(dots[i], on ? LV_OPA_COVER : LV_OPA_40, 0);
+    }
+}
+
+static void build_kaboo(lv_obj_t *root)
+{
+    const ui_glass_theme_t *t = theme();
+    lv_obj_t *stage = data_stage(root);
+
+    // 一张大玻璃卡承载当前窗口：窗口名 → 大字 token → 费用。
+    lv_obj_t *card = ui_glass_platter_create(stage, 12, 28, 184, 118, t);
+    s_kaboo_view.label = text_at(card, "", 0, 14, &lv_font_montserrat_14,
+                                 t->text_muted);
+    lv_obj_set_width(s_kaboo_view.label, 184);
+    lv_obj_set_style_text_align(s_kaboo_view.label, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_kaboo_view.value = text_at(card, "--", 0, 36, &font_digits_44, t->text);
+    lv_obj_set_width(s_kaboo_view.value, 184);
+    lv_obj_set_style_text_align(s_kaboo_view.value, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_kaboo_view.cost = text_at(card, "", 0, 88, &lv_font_montserrat_14,
+                                t->accent);
+    lv_obj_set_width(s_kaboo_view.cost, 184);
+    lv_obj_set_style_text_align(s_kaboo_view.cost, LV_TEXT_ALIGN_CENTER, 0);
+
+    build_dots(stage, 156, s_kaboo_view.dots, KABOO_CARD_COUNT, t);
+
+    // 模型名做成 accent 色胶囊，像 Activity 场景的状态 chip。
+    lv_obj_t *chip = solid_object(stage, 12, 172, 184, 28, LV_RADIUS_CIRCLE,
+                                  t->accent, LV_OPA_20);
+    s_kaboo_view.model = text_at(chip, "--", 0, 6, &lv_font_montserrat_14,
+                                 t->accent);
+    lv_obj_set_width(s_kaboo_view.model, 184);
+    lv_obj_set_style_text_align(s_kaboo_view.model, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_kaboo_view.note = text_at(stage, "", 12, 4, &lv_font_montserrat_14,
+                                t->warning);
+    lv_obj_set_width(s_kaboo_view.note, 184);
+    lv_obj_set_style_text_align(s_kaboo_view.note, LV_TEXT_ALIGN_CENTER, 0);
+}
+
+// 一个配额窗口 = 一块玻璃卡片：标题 + 百分比 + 进度条 + 重置提示。
+static void build_quota_card(lv_obj_t *stage, int y, const char *label,
+                             lv_obj_t **out_value, lv_obj_t **out_bar,
+                             lv_obj_t **out_reset)
+{
+    const ui_glass_theme_t *t = theme();
+    lv_obj_t *card = ui_glass_platter_create(stage, 12, y, 184, 82, t);
+
+    text_at(card, label, 14, 10, &lv_font_montserrat_14, t->text);
+    *out_value = text_at(card, "--", 100, 6, &lv_font_montserrat_20, t->text);
+    lv_obj_set_width(*out_value, 70);
+    lv_obj_set_style_text_align(*out_value, LV_TEXT_ALIGN_RIGHT, 0);
+
+    lv_obj_t *track = solid_object(card, 14, 40, 156, 8, LV_RADIUS_CIRCLE,
+                                   t->text, LV_OPA_10);
+    *out_bar = solid_object(track, 0, 0, 0, 8, LV_RADIUS_CIRCLE,
+                            t->accent, LV_OPA_COVER);
+
+    *out_reset = text_at(card, "", 14, 56, &lv_font_montserrat_14,
+                         t->text_muted);
+    lv_obj_set_width(*out_reset, 156);
+}
+
+// Claude 页两个窗口同屏各占一卡，不轮换 —— 配额只有两项，一眼看全更实用。
+static void build_claude(lv_obj_t *root)
+{
+    const ui_glass_theme_t *t = theme();
+    lv_obj_t *stage = data_stage(root);
+
+    build_quota_card(stage, 27, "5 hour",
+                     &s_claude_view.five_value, &s_claude_view.five_bar,
+                     &s_claude_view.five_reset);
+    build_quota_card(stage, 119, "7 day",
+                     &s_claude_view.seven_value, &s_claude_view.seven_bar,
+                     &s_claude_view.seven_reset);
+
+    s_claude_view.note = text_at(stage, "", 12, 4, &lv_font_montserrat_14,
+                                 t->warning);
+    lv_obj_set_width(s_claude_view.note, 184);
+    lv_obj_set_style_text_align(s_claude_view.note, LV_TEXT_ALIGN_CENTER, 0);
+}
+
+static void refresh_kaboo(const usage_snapshot_t *snap, bool have)
+{
+    static const char *const LABELS[KABOO_CARD_COUNT] = {
+        "TODAY", "7 DAYS", "30 DAYS",
+    };
+    const ui_glass_theme_t *t = theme();
+    if (!s_kaboo_view.value) return;
+
+    lv_label_set_text(s_kaboo_view.label, LABELS[s_kaboo_card]);
+    dots_select(s_kaboo_view.dots, KABOO_CARD_COUNT, s_kaboo_card, t);
+
+    if (!have || !(snap->flags & USAGE_FLAG_KABOO_VALID)) {
+        lv_label_set_text(s_kaboo_view.value, "--");
+        lv_label_set_text(s_kaboo_view.cost, "");
+        lv_label_set_text(s_kaboo_view.model, "--");
+        lv_label_set_text(s_kaboo_view.note,
+                          have ? "No kaboo data" : "Waiting for Mac");
+        return;
+    }
+
+    uint64_t tokens = snap->today_tokens;
+    uint32_t cents = snap->today_cost_cents;
+    if (s_kaboo_card == 1) {
+        tokens = snap->week_tokens;
+        cents = snap->week_cost_cents;
+    } else if (s_kaboo_card == 2) {
+        tokens = snap->month_tokens;
+        cents = snap->month_cost_cents;
+    }
+
+    char buf[32];
+    format_tokens(buf, sizeof buf, tokens);
+    lv_label_set_text(s_kaboo_view.value, buf);
+    format_cost(buf, sizeof buf, cents);
+    lv_label_set_text(s_kaboo_view.cost, buf);
+    lv_label_set_text(s_kaboo_view.model,
+                      snap->top_model[0] ? snap->top_model : "--");
+
+    // 数据源过期时明确标注，而不是让旧数字冒充当前值。
+    uint32_t now_unix = 0;
+    if (usage_model_now_unix(snap, have, esp_timer_get_time(), &now_unix) &&
+        !usage_model_source_fresh(snap->kaboo_sampled_unix, now_unix,
+                                  SOURCE_TTL_SECONDS)) {
+        lv_label_set_text(s_kaboo_view.note, "Data may be stale");
+    } else {
+        lv_label_set_text(s_kaboo_view.note, "");
+    }
+}
+
+static void refresh_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset,
+                              uint8_t pct, uint32_t resets_unix,
+                              uint32_t now_unix, bool have_now)
+{
+    const ui_glass_theme_t *t = theme();
+
+    lv_label_set_text_fmt(value, "%u%%", pct);
+    lv_obj_set_width(bar, 156 * pct / 100);   // 轨道宽 156，与 build_quota_card 一致
+
+    // 用量越高越接近告警色，让人一眼看出余量紧张。
+    uint32_t color = t->accent;
+    if (pct >= 90) color = t->danger;
+    else if (pct >= 70) color = t->warning;
+    lv_obj_set_style_bg_color(bar, lv_color_hex(color), 0);
+
+    if (!have_now) {
+        lv_label_set_text(reset, "");
+        return;
+    }
+    if (usage_model_quota_expired(resets_unix, now_unix)) {
+        lv_label_set_text(reset, "window elapsed");
+        return;
+    }
+    char buf[40];
+    format_remaining(buf, sizeof buf,
+                     usage_model_seconds_until(resets_unix, now_unix));
+    lv_label_set_text(reset, buf);
+}
+
+static void refresh_claude(const usage_snapshot_t *snap, bool have)
+{
+    if (!s_claude_view.five_value) return;
+
+    if (!have || !(snap->flags & USAGE_FLAG_CLAUDE_VALID)) {
+        lv_label_set_text(s_claude_view.five_value, "--");
+        lv_label_set_text(s_claude_view.seven_value, "--");
+        lv_obj_set_width(s_claude_view.five_bar, 0);
+        lv_obj_set_width(s_claude_view.seven_bar, 0);
+        lv_label_set_text(s_claude_view.five_reset, "");
+        lv_label_set_text(s_claude_view.seven_reset, "");
+        lv_label_set_text(s_claude_view.note,
+                          have ? "No quota data" : "Waiting for Mac");
+        return;
+    }
+
+    uint32_t now_unix = 0;
+    bool have_now = usage_model_now_unix(snap, have, esp_timer_get_time(),
+                                         &now_unix);
+    refresh_quota_row(s_claude_view.five_value, s_claude_view.five_bar,
+                      s_claude_view.five_reset, snap->five_hour_pct,
+                      snap->five_hour_resets_unix, now_unix, have_now);
+    refresh_quota_row(s_claude_view.seven_value, s_claude_view.seven_bar,
+                      s_claude_view.seven_reset, snap->seven_day_pct,
+                      snap->seven_day_resets_unix, now_unix, have_now);
+
+    if (have_now && !usage_model_source_fresh(snap->claude_sampled_unix,
+                                              now_unix, SOURCE_TTL_SECONDS)) {
+        lv_label_set_text(s_claude_view.note, "Data may be stale");
+    } else {
+        lv_label_set_text(s_claude_view.note, "");
+    }
+}
+
+// 从 BLE 快照刷新当前数据页。展示场景不取快照——零 BLE 开销，且它们的
+// view 指针在 stop_scene_activity 后为 NULL。
+// 上一次真正重绘时的输入指纹。数据页每 200ms 被 tick 一次，但渲染出的文字
+// 只在三种情况下变化：来了新 BLE 包、Kaboo 翻了卡、或者 Claude 倒计时跨过了
+// 一分钟。其余 tick 全部跳过 —— 否则 21 个 label 每秒被重写 5 次，在没有
+// PSRAM 的堆上是 100+ 次/秒的 malloc/free 空转。
+static struct {
+    uint32_t generation;
+    uint8_t  card;
+    uint32_t minute;
+    bool     valid;
+} s_data_drawn;
+
+static void refresh_data_page(void)
+{
+    if (!is_data_page(s_page)) return;
+    usage_snapshot_t snap;
+    uint32_t generation = 0;
+    bool have = usage_link_get(&snap, &generation);
+
+    uint32_t now_unix = 0;
+    uint32_t minute = 0;
+    if (have && usage_model_now_unix(&snap, have, esp_timer_get_time(), &now_unix)) {
+        minute = now_unix / 60u;
+    }
+    if (s_data_drawn.valid && s_data_drawn.generation == generation &&
+        s_data_drawn.card == s_kaboo_card && s_data_drawn.minute == minute) {
+        return;
+    }
+    s_data_drawn = (typeof(s_data_drawn)){
+        .generation = generation, .card = s_kaboo_card,
+        .minute = minute, .valid = true,
+    };
+
+    if (s_page == PAGE_KABOO) refresh_kaboo(&snap, have);
+    else refresh_claude(&snap, have);
+}
+
+static void kaboo_card_advance(void)
+{
+    s_kaboo_card = (uint8_t)((s_kaboo_card + 1u) % KABOO_CARD_COUNT);
+    s_card_elapsed_ms = 0;
+    refresh_data_page();
+}
+
 static void scene_build(showcase_page_t page, lv_obj_t *root)
 {
     lv_obj_t *content = plain_object(
@@ -1269,39 +1659,41 @@ static void scene_build(showcase_page_t page, lv_obj_t *root)
     case SHOWCASE_NAVIGATION:    build_navigation(content); break;
     case SHOWCASE_FEEDBACK:      build_feedback(content); break;
     case SHOWCASE_STATES:        build_states(content); break;
+    case PAGE_KABOO:             build_kaboo(content); break;
+    case PAGE_CLAUDE:            build_claude(content); break;
     default:                     build_buttons(content); break;
     }
+    // 数据页建好后立刻用最后一份快照填充，不等下一个 tick 留出空白帧。
+    // 刚建的 label 是空的，必须作废上一次的指纹，否则同一份快照会被跳过。
+    s_data_drawn.valid = false;
+    refresh_data_page();
 }
 
 static void shell_refresh(void)
 {
     const ui_glass_theme_t *t = theme();
     uint8_t position = page_position(s_page);
-    lv_label_set_text_fmt(s_header_title, "%u/8  %s",
-                          (unsigned)position + 1u, PAGE_TITLES[s_page]);
+    // 标题只放页名。"N/10" 计数会把 "Appearance" 顶到 x=190，撞上右上角
+    // 168 起的电量位；位置信息由导航条的邻居页名承担。
+    lv_label_set_text(s_header_title, PAGE_TITLES[s_page]);
     set_label_color(s_header_title, t->text);
-    set_label_color(s_battery_label, t->text);
-    if (s_presented_battery_soc != s_battery_soc) {
-        if (s_battery_soc >= 0) {
-            lv_label_set_text_fmt(s_battery_label, "%d%%", s_battery_soc);
-        } else {
-            lv_label_set_text(s_battery_label, "--%");
-        }
-        s_presented_battery_soc = s_battery_soc;
-    }
+    // 导航条两侧都标出邻居页名：长按 OK / 双击 UP 去左边，UP 去右边。只写一侧会
+    // 让人以为翻页是单向的。中间 3 个空格是余量：最宽的相邻对（Moments 页的
+    // "Activity / Appearance"）在此格式下 187px，留 25px 给 212px 的平台。
+    uint8_t left = (uint8_t)((position + SHOWCASE_PAGE_COUNT - 1u) %
+                             SHOWCASE_PAGE_COUNT);
+    uint8_t right = (uint8_t)((position + 1u) % SHOWCASE_PAGE_COUNT);
     lv_label_set_text_fmt(
-        s_footer_label, "UP NEXT  %s  %s",
-        PAGE_SECONDARY_ACTION[s_page], PAGE_PRIMARY_ACTION[s_page]);
+        s_footer_label, LV_SYMBOL_LEFT "  %s   %s  " LV_SYMBOL_RIGHT,
+        PAGE_TITLES[PAGE_ORDER[left]], PAGE_TITLES[PAGE_ORDER[right]]);
     set_label_color(s_footer_label, t->text_muted);
     ui_glass_surface_set_tint(s_footer, t->control_tint,
                               t->control_opacity);
     ui_glass_surface_set_material(s_footer, t->control_material);
     ui_glass_surface_set_edge_strength(s_footer, t->focus_edge_strength);
-    if (s_page == SHOWCASE_OVERLAYS || s_page == SHOWCASE_NAVIGATION) {
-        lv_obj_add_flag(s_footer, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_remove_flag(s_footer, LV_OBJ_FLAG_HIDDEN);
-    }
+    // 导航条在每一页都可见：它现在承担导航信息，不再只是动作提示。
+    lv_obj_remove_flag(s_footer, LV_OBJ_FLAG_HIDDEN);
+    link_dot_refresh();
     // Scenes are replaced throughout the reel, while the header and footer are
     // persistent chrome. Keeping title and battery under one parent makes
     // their clipping and Z order atomic across a translating page scene.
@@ -1328,36 +1720,34 @@ static void page_transition_set(void *value, int32_t progress)
     lv_obj_set_style_opa(transition->incoming, LV_OPA_COVER, 0);
 }
 
-static void scene_timer_finish(lv_timer_t *timer)
+// 步进表跑到尽头时调用；语义与原来删掉一次性 timer 相同。
+static void scene_timer_finish(void)
 {
-    if (!timer) return;
-    lv_timer_delete(timer);
-    if (s_scene_timer == timer) s_scene_timer = NULL;
+    s_scene_done = true;
 }
 
-static void scene_showcase_tick(lv_timer_t *timer)
+static void scene_showcase_step(void)
 {
-    if (s_transitioning) return;
     s_scene_step++;
     switch (s_page) {
     case SHOWCASE_BUTTONS:
         if (s_scene_step == 1) focused_action();
         else if (s_scene_step == 2 || s_scene_step == 4) focus_move(1);
         else if (s_scene_step == 3 || s_scene_step == 5) focused_action();
-        else scene_timer_finish(timer);
+        else scene_timer_finish();
         break;
     case SHOWCASE_SELECTION:
         if (s_scene_step == 1) focused_action();
         else if (s_scene_step == 2 || s_scene_step == 4) focus_move(1);
         else if (s_scene_step == 3) focused_action();
         else if (s_scene_step == 5) press_focused_component();
-        else scene_timer_finish(timer);
+        else scene_timer_finish();
         break;
     case SHOWCASE_ADJUSTMENTS:
         if (s_scene_step == 1) focused_action();
         else if (s_scene_step == 2 || s_scene_step == 4) focus_move(1);
         else if (s_scene_step == 3 || s_scene_step == 5) focused_action();
-        else scene_timer_finish(timer);
+        else scene_timer_finish();
         break;
     case SHOWCASE_LISTS:
         if (s_scene_step == 1 || s_scene_step == 2 || s_scene_step == 4) {
@@ -1365,7 +1755,7 @@ static void scene_showcase_tick(lv_timer_t *timer)
         } else if (s_scene_step == 3 || s_scene_step == 5) {
             focused_action();
         } else {
-            scene_timer_finish(timer);
+            scene_timer_finish();
         }
         break;
     case SHOWCASE_OVERLAYS:
@@ -1377,50 +1767,36 @@ static void scene_showcase_tick(lv_timer_t *timer)
         } else if (s_scene_step == 5) {
             focused_action();
         } else {
-            scene_timer_finish(timer);
+            scene_timer_finish();
         }
         break;
     case SHOWCASE_NAVIGATION:
         if (s_scene_step <= 3) navigation_select(1);
-        else scene_timer_finish(timer);
+        else scene_timer_finish();
         break;
     case SHOWCASE_FEEDBACK:
         if (s_scene_step <= 3) focused_action();
-        else scene_timer_finish(timer);
+        else scene_timer_finish();
         break;
     case SHOWCASE_STATES:
-        if (s_scene_step == 1) focus_move(1);
-        else if (s_scene_step == 2) focused_action();
-        else scene_timer_finish(timer);
+        // 无人巡航只演示焦点移动，不真的应用无障碍模式。模式存在共享
+        // runtime 里，应用后会重新主题化全部十页；在无限循环的巡航里那意味着
+        // Kaboo / Claude 每 70 秒换一次配色。用户按 OK 时才切换。
+        if (s_scene_step <= 2) focus_move(1);
+        else scene_timer_finish();
         break;
     default:
-        scene_timer_finish(timer);
+        scene_timer_finish();
         break;
     }
 }
 
+// 重置当前场景的步进演示。数据页没有步进表，直接标记完成。
 static void start_scene_showcase(void)
 {
-    if (s_scene_timer) {
-        lv_timer_delete(s_scene_timer);
-        s_scene_timer = NULL;
-    }
-    switch (s_page) {
-    case SHOWCASE_BUTTONS:
-    case SHOWCASE_SELECTION:
-    case SHOWCASE_ADJUSTMENTS:
-    case SHOWCASE_LISTS:
-    case SHOWCASE_OVERLAYS:
-    case SHOWCASE_NAVIGATION:
-    case SHOWCASE_FEEDBACK:
-    case SHOWCASE_STATES:
-        s_scene_step = 0;
-        s_scene_timer = lv_timer_create(
-            scene_showcase_tick, SHOWCASE_SCENE_STEP_MS, NULL);
-        break;
-    default:
-        break;
-    }
+    s_scene_step = 0;
+    s_step_elapsed_ms = 0;
+    s_scene_done = is_data_page(s_page);
 }
 
 static void page_transition_completed(lv_anim_t *animation)
@@ -1454,12 +1830,6 @@ static void show_page(showcase_page_t page, int8_t direction, bool animate)
     // Keep status and command chrome stable for every intermediate frame.
     lv_obj_move_foreground(s_header_chrome);
     lv_obj_move_foreground(s_footer);
-    // Player and Home own the lower safe area. Hide the previous page footer
-    // before either destination begins sliding in so scene copy cannot cross
-    // through a stale command capsule during the transition.
-    if (page == SHOWCASE_OVERLAYS || page == SHOWCASE_NAVIGATION) {
-        lv_obj_add_flag(s_footer, LV_OBJ_FLAG_HIDDEN);
-    }
 
     uint16_t duration = ui_glass_motion_duration(
         s_runtime.mode, UI_GLASS_MOTION_PAGE);
@@ -1506,12 +1876,61 @@ static void rebuild_page(void)
     show_page(s_page, 1, false);
 }
 
-static void tour_tick(lv_timer_t *timer)
+// BLE 链路指示点。独立成函数是因为它必须每个 tick 都刷：只在翻页时刷的话，
+// 用户停在一页上时 Mac 连上/断开都不会反映出来。
+static void link_dot_refresh(void)
+{
+    if (!s_link_dot) return;
+    const ui_glass_theme_t *t = theme();
+    lv_obj_set_style_bg_color(
+        s_link_dot,
+        lv_color_hex(usage_link_connected() ? t->positive : t->text_muted), 0);
+}
+
+// 单一主定时器：巡航、场景步进、Kaboo 轮换、BLE 刷新全在这里按各自计数器推进。
+static void master_tick(lv_timer_t *timer)
 {
     (void)timer;
+    // 链路点在转场期间也要刷，它不属于任何 scene。
+    link_dot_refresh();
     if (s_transitioning) return;
-    s_tour_steps = (uint8_t)((s_tour_steps + 1u) % SHOWCASE_PAGE_COUNT);
-    navigate_showcase_page(1);
+
+    if (is_data_page(s_page)) {
+        // 数据页：Kaboo 自动翻卡 + 从 BLE 快照刷新。手动翻卡后先暂停一会。
+        if (s_page == PAGE_KABOO) {
+            if (s_card_hold_ms > 0) {
+                s_card_hold_ms = s_card_hold_ms > SHOWCASE_TICK_MS
+                                     ? s_card_hold_ms - SHOWCASE_TICK_MS : 0;
+            } else {
+                s_card_elapsed_ms += SHOWCASE_TICK_MS;
+                if (s_card_elapsed_ms >= CARD_ROTATE_MS) kaboo_card_advance();
+            }
+        }
+        refresh_data_page();
+        // 无人巡航只在展示场景之间走：自动翻走一个实时看板毫无意义。
+        return;
+    }
+
+    // 展示场景：1 秒一步的页内演示，跑完即止。
+    if (!s_scene_done) {
+        s_step_elapsed_ms += SHOWCASE_TICK_MS;
+        if (s_step_elapsed_ms >= SHOWCASE_SCENE_STEP_MS) {
+            s_step_elapsed_ms = 0;
+            scene_showcase_step();
+        }
+    }
+    // 7 秒无人巡航，任何按键后永久停止。到 Appearance 后折返 Player，
+    // 不进入数据页。
+    if (!s_tour_killed) {
+        s_tour_elapsed_ms += SHOWCASE_TICK_MS;
+        if (s_tour_elapsed_ms >= SHOWCASE_TOUR_PERIOD_MS) {
+            s_tour_elapsed_ms = 0;
+            uint8_t next = (uint8_t)((page_position(s_page) + 1u) %
+                                     SHOWCASE_PAGE_COUNT);
+            if (is_data_page(PAGE_ORDER[next])) next = 0;
+            show_page(PAGE_ORDER[next], 1, true);
+        }
+    }
 }
 
 static void focused_action(void)
@@ -1597,17 +2016,20 @@ static void focused_action(void)
     }
 }
 
-void demo_glass_system_set_battery(int soc)
+void dashboard_set_battery(int soc)
 {
     s_battery_soc = soc;
 }
 
-void demo_glass_system_enter(void)
+void dashboard_enter(void)
 {
     s_page = SHOWCASE_OVERLAYS;
     s_transitioning = false;
-    s_tour_steps = 0;
-    s_presented_battery_soc = -2;
+    s_tour_killed = false;
+    s_tour_elapsed_ms = 0;
+    s_kaboo_card = 0;
+    s_card_elapsed_ms = 0;
+    s_card_hold_ms = 0;
     if (!ui_glass_runtime_init(&s_runtime, UI_GLASS_MODE_STANDARD,
                                UI_GLASS_QUALITY_FULL)) {
         return;
@@ -1618,12 +2040,17 @@ void demo_glass_system_enter(void)
         SHOWCASE_SCENE_Y);
     s_header_title = text_at(s_header_chrome, PAGE_TITLES[s_page],
                              16, 12, &lv_font_montserrat_20, t->text);
-    s_battery_label = text_at(s_header_chrome, "--%", 188, 13,
+    // 右上角：电量百分比 + BLE 链路指示点。固定几何，避免自动布局在页面
+    // 切换瞬间因文字宽度变化而抖动。-1 时显示 "--%" 而不是画一个数字。
+    s_battery_label = text_at(s_header_chrome, "--%", 168, 13,
                               &lv_font_montserrat_14, t->text);
-    // Fixed status geometry avoids an initial auto-size/wrap pass dropping a
-    // 3-digit percentage at the exact moment a new scene becomes visible.
     lv_obj_set_size(s_battery_label, 36, 20);
     lv_obj_set_style_text_align(s_battery_label, LV_TEXT_ALIGN_RIGHT, 0);
+    if (s_battery_soc >= 0) {
+        lv_label_set_text_fmt(s_battery_label, "%d%%", s_battery_soc);
+    }
+    s_link_dot = solid_object(s_header_chrome, 210, 20, 10, 10,
+                              LV_RADIUS_CIRCLE, t->text_muted, LV_OPA_COVER);
     s_footer = ui_glass_platter_create(
         s_runtime.screen, 14, 272, 212, 36, t);
     s_footer_label = ui_glass_label(
@@ -1640,11 +2067,18 @@ void demo_glass_system_enter(void)
     shell_refresh();
     lv_screen_load(s_runtime.screen);
     start_scene_showcase();
-    s_tour_timer = lv_timer_create(tour_tick, SHOWCASE_TOUR_PERIOD_MS, NULL);
+    // 主定时器最后创建：此时屏幕与 chrome 都已就位，第一个 tick 就能安全刷新。
+    s_tick_timer = lv_timer_create(master_tick, SHOWCASE_TICK_MS, NULL);
 }
 
-void demo_glass_system_exit(void)
+void dashboard_exit(void)
 {
+    // 先停 timer 再删屏 —— 反过来会让回调访问已释放对象。
+    // 这里不停 BLE：链路是应用级常驻服务，不属于任何单页。
+    if (s_tick_timer) {
+        lv_timer_delete(s_tick_timer);
+        s_tick_timer = NULL;
+    }
     stop_tour();
     stop_scene_activity();
     lv_anim_delete(&s_page_motion, page_transition_set);
@@ -1653,21 +2087,30 @@ void demo_glass_system_exit(void)
     s_scene = NULL;
     s_header_chrome = NULL;
     s_header_title = NULL;
+    s_link_dot = NULL;
     s_battery_label = NULL;
     s_footer = NULL;
     s_footer_label = NULL;
-    s_presented_battery_soc = -2;
     memset(&s_page_motion, 0, sizeof(s_page_motion));
+    memset(&s_kaboo_view, 0, sizeof(s_kaboo_view));
+    memset(&s_claude_view, 0, sizeof(s_claude_view));
 }
 
-void demo_glass_system_key(bsp_btn_t button, bsp_btn_ev_t event)
+void dashboard_key(bsp_btn_t button, bsp_btn_ev_t event)
 {
+    // 任何按键都永久停止无人巡航，并让当前场景的自动演示让位给用户。
     stop_tour();
     stop_scene_timer();
     if (s_transitioning) return;
 
     if (event == BSP_BTN_DOUBLE) {
         if (button == BSP_BTN_UP) navigate_showcase_page(-1);
+        return;
+    }
+    // 长按 OK = 上一页。导航条左侧标着邻居页名，得有一个单次动作能去那里；
+    // 双击 UP 也行，但长按更容易被发现。原 demo 菜单的长按-返回已不存在。
+    if (event == BSP_BTN_LONG) {
+        if (button == BSP_BTN_OK) navigate_showcase_page(-1);
         return;
     }
     if (event != BSP_BTN_CLICK) return;
@@ -1678,6 +2121,19 @@ void demo_glass_system_key(bsp_btn_t button, bsp_btn_ev_t event)
     if (button == BSP_BTN_UP) {
         navigate_showcase_page(1);
         return;
+    }
+
+    // 数据页沿用同一约定：DOWN 切换页内状态（照 Activity 场景的先例），
+    // OK 是焦点动作 —— Kaboo 只有一个可动的东西，就是当前卡片。
+    if (s_page == PAGE_KABOO) {
+        if (button == BSP_BTN_DOWN || button == BSP_BTN_OK) {
+            kaboo_card_advance();
+            s_card_hold_ms = CARD_MANUAL_HOLD_MS;
+        }
+        return;
+    }
+    if (s_page == PAGE_CLAUDE) {
+        return;   // 两卡同屏无焦点，DOWN/OK 无操作
     }
 
     if (s_page == SHOWCASE_OVERLAYS && s_morph.open) {

@@ -6,6 +6,19 @@
 
 ## Unreleased
 
+- 把八场景展示卷与实时数据看板合并为一个十页轮播：Player、Home、Focus、Controls、
+  Devices、Activity、Moments、Appearance，之后是 Kaboo token 用量与 Claude 限额。两个
+  数据页的数据由配套 Mac（`tools/usage_bridge.py`）经 BLE 推送，固件内常驻一个
+  NimBLE GATT server 且只由应用持有一次。十页共用一个
+  runtime、一块屏幕、一套 header/footer 与一个 200 ms 主定时器，它同时驱动 7 s 巡航、
+  1 s 场景步进演示、Kaboo 的 8 s 卡片轮换与 BLE 刷新。导航条在每一页都可见并标出
+  左右邻居页名；长按 OK 与双击 UP 向左，UP 向右，DOWN/OK 在所有页面保留页内语义，
+  包括 Kaboo 的翻卡。无人巡航跳过数据页，经过 Appearance 时不再应用无障碍模式，
+  主题不再每圈漂移；手动按 OK 仍可应用。header 保留电量百分比并新增每 tick 刷新的
+  BLE 链路指示点；标题去掉页码计数以容纳两者。Home 的 dock 与 Player 的状态行上移
+  以避开常驻导航条。数据页 label
+  仅在新 BLE 包、翻卡或跨分钟使文字变化时才重绘，不再每 tick 重写。Kaboo 的大字
+  数字使用数字子集的 44 px 字体渲染。
 - 新增首版可复用 AI Passport Glass System Foundation：可移植设计 Tokens、四种无障碍
   Profile、确定性非线性 Motion、统一连续三键 Focus Model、通栏内容画布、语义化实色
   分组与玻璃控制组件、动态显示质量 Runtime，以及 BSP 公共性能快照；默认真机

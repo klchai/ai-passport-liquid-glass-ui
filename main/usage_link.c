@@ -1,0 +1,302 @@
+// main/usage_link.c —— 常驻 BLE GATT server，接收 Mac 推来的看板数据。
+//
+// 设计要点：
+//  - 本模块是 NimBLE 的唯一 owner。仓库中不得存在第二处 nimble_port_init()，
+//    ESP32-C3 controller 只有 IDLE 态可以 init，二次调用必然失败。
+//  - GATT 写回调运行在 NimBLE host 任务，**绝不触碰 LVGL**。数据经
+//    mutex + generation 一次性发布，UI 侧轮询取副本。
+//  - 快照有 USAGE_WIRE_SIZE 字节，volatile 无法保证原子发布，必须走锁。
+#include "usage_link.h"
+
+#include <string.h>
+
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "host/ble_gap.h"
+#include "host/ble_hs.h"
+#include "host/util/util.h"
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
+#include "nvs_flash.h"
+#include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
+
+static const char *TAG = "usage_link";
+static const char *DEVICE_NAME = "FoloPassport";
+
+// 128-bit 自定义 UUID。主广播里放 service UUID 便于 Mac 精确过滤，
+// 完整设备名放 scan response —— legacy adv 只有 31 字节，两者塞不下。
+//
+// Service: 6b1d0001-5f9a-4c33-9a1e-2f8b7c4d5e60
+static const ble_uuid128_t SVC_UUID = BLE_UUID128_INIT(
+    0x60, 0x5e, 0x4d, 0x7c, 0x8b, 0x2f, 0x1e, 0x9a,
+    0x33, 0x4c, 0x9a, 0x5f, 0x01, 0x00, 0x1d, 0x6b);
+
+// Characteristic: 6b1d0002-5f9a-4c33-9a1e-2f8b7c4d5e60
+static const ble_uuid128_t CHR_UUID = BLE_UUID128_INIT(
+    0x60, 0x5e, 0x4d, 0x7c, 0x8b, 0x2f, 0x1e, 0x9a,
+    0x33, 0x4c, 0x9a, 0x5f, 0x02, 0x00, 0x1d, 0x6b);
+
+static SemaphoreHandle_t s_mutex;
+static usage_snapshot_t  s_snapshot;
+static uint32_t          s_generation;      // 每次成功提交自增
+static bool              s_have_snapshot;
+
+static usage_link_state_t s_state = USAGE_LINK_IDLE;
+static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+static uint16_t s_mtu;
+static uint8_t  s_addr_type;
+static bool     s_started;
+
+static int gap_event(struct ble_gap_event *event, void *arg);
+
+static void advertise(void)
+{
+    // 主广播：flags + 128-bit service UUID。名字放不下，见下面的 scan response。
+    struct ble_hs_adv_fields fields = { 0 };
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    fields.uuids128 = (ble_uuid128_t *)&SVC_UUID;
+    fields.num_uuids128 = 1;
+    fields.uuids128_is_complete = 1;
+
+    int rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "adv_set_fields 失败: %d", rc);
+        return;
+    }
+
+    struct ble_hs_adv_fields rsp = { 0 };
+    rsp.name = (const uint8_t *)DEVICE_NAME;
+    rsp.name_len = strlen(DEVICE_NAME);
+    rsp.name_is_complete = 1;
+    rc = ble_gap_adv_rsp_set_fields(&rsp);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "adv_rsp_set_fields 失败: %d", rc);
+        return;
+    }
+
+    // 可连接、一般可发现。这是与旧 demo_ble.c 的关键差别（那里是 CONN_MODE_NON）。
+    struct ble_gap_adv_params params = { 0 };
+    params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+
+    rc = ble_gap_adv_start(s_addr_type, NULL, BLE_HS_FOREVER, &params,
+                           gap_event, NULL);
+    if (rc != 0) ESP_LOGE(TAG, "adv_start 失败: %d", rc);
+}
+
+// 状态推进集中在这里：转移表是 usage_model 里的纯函数，已被 host test 覆盖。
+static void link_event(usage_link_event_t event)
+{
+    usage_link_action_t action = USAGE_LINK_ACTION_NONE;
+    s_state = usage_model_link_step(s_state, event, &action);
+    if (action == USAGE_LINK_ACTION_ADVERTISE) advertise();
+}
+
+static int on_chr_write(struct ble_gatt_access_ctxt *ctxt)
+{
+    uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
+    if (len != USAGE_WIRE_SIZE) {
+        ESP_LOGW(TAG, "payload 长度 %u，期望 %d", len, USAGE_WIRE_SIZE);
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+
+    uint8_t wire[USAGE_WIRE_SIZE];
+    uint16_t copied = 0;
+    int rc = ble_hs_mbuf_to_flat(ctxt->om, wire, sizeof wire, &copied);
+    if (rc != 0 || copied != USAGE_WIRE_SIZE) return BLE_ATT_ERR_UNLIKELY;
+
+    // 解码与校验在锁外的局部变量上完成，临界区只做整体赋值。
+    usage_snapshot_t decoded;
+    usage_decode_result_t result =
+        usage_model_decode(wire, sizeof wire, esp_timer_get_time(), &decoded);
+    if (result != USAGE_DECODE_OK) {
+        ESP_LOGW(TAG, "payload 校验失败: %d（保留上一份快照）", (int)result);
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    s_snapshot = decoded;          // 数据与接收时刻属于同一次提交
+    s_have_snapshot = true;
+    s_generation++;
+    xSemaphoreGive(s_mutex);
+
+    return 0;
+}
+
+static int chr_access(uint16_t conn_handle, uint16_t attr_handle,
+                      struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)arg;
+
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) return on_chr_write(ctxt);
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+static const struct ble_gatt_svc_def GATT_SVCS[] = {
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &SVC_UUID.u,
+        .characteristics = (struct ble_gatt_chr_def[]) {
+            {
+                // 只开 WRITE（write-with-response）。低 MTU 时由 NimBLE 的
+                // prepare/execute long write 汇聚成完整 USAGE_WIRE_SIZE 字节后再回调。
+                .uuid = &CHR_UUID.u,
+                .access_cb = chr_access,
+                .flags = BLE_GATT_CHR_F_WRITE,
+            },
+            { 0 },
+        },
+    },
+    { 0 },
+};
+
+static int gap_event(struct ble_gap_event *event, void *arg)
+{
+    (void)arg;
+
+    switch (event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        if (event->connect.status == 0) {
+            s_conn_handle = event->connect.conn_handle;
+            s_mtu = ble_att_mtu(s_conn_handle);
+            ESP_LOGI(TAG, "已连接 handle=%u mtu=%u", s_conn_handle, s_mtu);
+            link_event(USAGE_LINK_EV_CONNECT_OK);
+        } else {
+            // 连接失败后 controller 已停止广播，必须显式恢复。
+            ESP_LOGW(TAG, "连接失败: %d", event->connect.status);
+            link_event(USAGE_LINK_EV_CONNECT_FAIL);
+        }
+        break;
+
+    case BLE_GAP_EVENT_DISCONNECT:
+        ESP_LOGI(TAG, "断开: %d", event->disconnect.reason);
+        s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        s_mtu = 0;
+        // 漏掉这条会导致断连后设备永久不可再被发现。
+        link_event(USAGE_LINK_EV_DISCONNECT);
+        break;
+
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        link_event(USAGE_LINK_EV_ADV_COMPLETE);
+        break;
+
+    case BLE_GAP_EVENT_MTU:
+        s_mtu = event->mtu.value;
+        ESP_LOGI(TAG, "MTU 协商为 %u", s_mtu);
+        break;
+
+    default:
+        break;
+    }
+    return 0;
+}
+
+static void on_sync(void)
+{
+    int rc = ble_hs_util_ensure_addr(0);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ensure_addr 失败: %d", rc);
+        return;
+    }
+    rc = ble_hs_id_infer_auto(0, &s_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "infer_auto 失败: %d", rc);
+        return;
+    }
+    link_event(USAGE_LINK_EV_SYNC);
+}
+
+static void on_reset(int reason)
+{
+    ESP_LOGW(TAG, "host reset: %d", reason);
+    s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    s_mtu = 0;
+    s_state = USAGE_LINK_IDLE;   // 后续 on_sync 会重新起广播
+}
+
+static void host_task(void *arg)
+{
+    (void)arg;
+    nimble_port_run();
+    nimble_port_freertos_deinit();
+}
+
+esp_err_t usage_link_start(void)
+{
+    if (s_started) return ESP_ERR_INVALID_STATE;
+
+    // NimBLE 需要 NVS。失败时不擦分区 —— cardid 等出厂数据不能被本模块碰。
+    esp_err_t err = nvs_flash_init();
+    if (err != ESP_OK && err != ESP_ERR_NVS_NO_FREE_PAGES &&
+        err != ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGE(TAG, "nvs_flash_init 失败: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    s_mutex = xSemaphoreCreateMutex();
+    if (!s_mutex) return ESP_ERR_NO_MEM;
+
+    err = nimble_port_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nimble_port_init 失败: %s", esp_err_to_name(err));
+        vSemaphoreDelete(s_mutex);
+        s_mutex = NULL;
+        return err;
+    }
+
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+
+    int rc = ble_gatts_count_cfg(GATT_SVCS);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "gatts_count_cfg 失败: %d", rc);
+        return ESP_FAIL;
+    }
+    rc = ble_gatts_add_svcs(GATT_SVCS);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "gatts_add_svcs 失败: %d", rc);
+        return ESP_FAIL;
+    }
+
+    rc = ble_svc_gap_device_name_set(DEVICE_NAME);
+    if (rc != 0) ESP_LOGW(TAG, "device_name_set 失败: %d", rc);
+
+    ble_hs_cfg.reset_cb = on_reset;
+    ble_hs_cfg.sync_cb = on_sync;
+
+    s_started = true;
+    nimble_port_freertos_init(host_task);
+    ESP_LOGI(TAG, "BLE 链路已启动，等待 Mac 推送");
+    return ESP_OK;
+}
+
+bool usage_link_get(usage_snapshot_t *out, uint32_t *out_generation)
+{
+    if (!out || !s_mutex) return false;
+
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+    bool have = s_have_snapshot;
+    if (have) {
+        *out = s_snapshot;
+        if (out_generation) *out_generation = s_generation;
+    }
+    xSemaphoreGive(s_mutex);
+    return have;
+}
+
+bool usage_link_connected(void)
+{
+    return s_conn_handle != BLE_HS_CONN_HANDLE_NONE;
+}
+
+uint16_t usage_link_mtu(void)
+{
+    return s_mtu;
+}

@@ -6,6 +6,26 @@
 
 ## Unreleased
 
+- Merged the eight-scene showcase and the live-data dashboard into one
+  ten-page carousel: Player, Home, Focus, Controls, Devices, Activity,
+  Moments, Appearance, then Kaboo token usage and Claude quota. The two data
+  pages are fed over BLE from a companion Mac (`tools/usage_bridge.py`) through
+  an always-on NimBLE GATT server that the app owns exactly once. All ten
+  pages share one runtime, one screen, one
+  header/footer, and one 200 ms master timer that now drives the 7 s tour, the
+  1 s scene-step demos, Kaboo's 8 s card rotation, and BLE refresh together.
+  The footer is visible on every page and names the left and right neighbour
+  pages; long-press OK and double-tap UP go left, UP goes right, and DOWN/OK
+  keep their in-scene meaning on all pages, including Kaboo's card advance.
+  The unattended tour skips the data pages and no longer applies an
+  accessibility mode when it passes Appearance, so the theme no longer drifts
+  each cycle; a manual OK on Appearance still applies one. The header keeps
+  the battery percentage and adds a BLE link dot that refreshes every tick;
+  the page counter was dropped from the title so the two fit. Home's dock and
+  Player's status lines moved up to clear the persistent footer. Data-page
+  labels are redrawn only when a new BLE packet, a card change, or a minute
+  boundary makes their text differ, instead of on every tick. A digit-subset
+  44 px face renders Kaboo's headline number.
 - Added the first reusable AI Passport Glass System foundation: portable design
   tokens, four accessibility profiles, deterministic non-linear motion, one
   continuous three-button focus model, full-bleed content canvases, semantic
