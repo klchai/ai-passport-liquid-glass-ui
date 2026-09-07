@@ -54,38 +54,67 @@ static int gap_event(struct ble_gap_event *event, void *arg);
 
 // 广播恢复重试。advertise() 失败时不能只打日志：GAP 事件是恢复的唯一入口，
 // 而没有开始广播就永远不会再有 ADV_COMPLETE/CONNECT，设备会静默地永久不可
-// 发现，只能靠重启救回来。用一个一次性 esp_timer 退避重试。
-#define ADV_RETRY_DELAY_US (2 * 1000 * 1000)
+// 发现，只能靠重启救回来。
+//
+// 重试用 NimBLE 自己的 callout，而不是 esp_timer：callout 到期后把事件投进
+// host 默认事件队列，回调在 NimBLE host task 上执行——与 on_sync / gap_event
+// 同一上下文。这样 (1) 设地址、设广播数据、起广播这些要等 HCI ACK 的调用不会
+// 卡住 esp_timer task；(2) s_state / s_identity_ready 只在 host task 上读写，
+// 不需要跨任务同步。
+#define ADV_RETRY_DELAY_MS 2000
 
-static esp_timer_handle_t s_adv_retry;
+static struct ble_npl_callout s_adv_retry;
+// ble_npl_callout_stop() 只停 timer；一个已经到期、已经排进事件队列的重试事件
+// 仍会执行。on_reset 递增 epoch，排队时记下当时的 epoch，回调发现不一致就作废，
+// 这样 reset 之前排队的重试不会在新一轮 sync 之前抢跑。若 reset 之后 on_sync
+// 又排了一次重试，两个 epoch 会相同——那种情况靠 timer 是否仍在跑来区分，
+// 见 adv_retry_cb。
+static uint32_t s_reset_epoch;
+static uint32_t s_retry_epoch;
+// on_sync 里的地址准备（ensure_addr / infer_auto）是起广播的前置条件，而它失败
+// 同样不会有任何后续 GAP 事件再来触发。所以它和广播失败共用这条重试通道：
+// 未就绪时先补地址，补上后再经状态机起广播。
+static bool s_identity_ready;
 static bool advertise_now(void);
-
-static void adv_retry_cb(void *arg)
-{
-    (void)arg;
-    if (s_state == USAGE_LINK_STOPPING) return;
-    if (!advertise_now()) {
-        ESP_LOGW(TAG, "广播重试仍失败，%d 秒后再试",
-                 (int)(ADV_RETRY_DELAY_US / 1000000));
-        esp_timer_start_once(s_adv_retry, ADV_RETRY_DELAY_US);
-    }
-}
+static bool prepare_identity(void);
+static void link_event(usage_link_event_t event);
 
 static void schedule_adv_retry(void)
 {
     if (s_state == USAGE_LINK_STOPPING) return;
-    if (!s_adv_retry) {
-        const esp_timer_create_args_t args = {
-            .callback = adv_retry_cb,
-            .name = "adv_retry",
-        };
-        if (esp_timer_create(&args, &s_adv_retry) != ESP_OK) {
-            ESP_LOGE(TAG, "无法创建广播重试 timer；设备可能保持不可发现");
+    s_retry_epoch = s_reset_epoch;
+    // reset 会先停掉已排队的那次，所以重复调用是幂等的。
+    if (ble_npl_callout_reset(&s_adv_retry,
+                              ble_npl_time_ms_to_ticks32(ADV_RETRY_DELAY_MS))
+        != BLE_NPL_OK) {
+        ESP_LOGE(TAG, "无法排队广播重试；设备可能保持不可发现");
+    }
+}
+
+// 在 NimBLE host task 上执行（见 s_adv_retry 的说明）。
+static void adv_retry_cb(struct ble_npl_event *ev)
+{
+    (void)ev;
+    if (s_state == USAGE_LINK_STOPPING) return;
+    if (s_retry_epoch != s_reset_epoch) return;   // reset 之前排队的：作废
+    // reset 之后若已重新排队，s_retry_epoch 被刷成新 epoch，上面拦不住 reset
+    // 前入队的旧事件。但那时新 timer 一定还在跑（它到期后才会再投事件），而
+    // 属于"自己这次到期"的事件运行时 timer 已经停了：timer 仍活跃 == 旧事件。
+    if (ble_npl_callout_is_active(&s_adv_retry)) return;
+    if (!s_identity_ready) {
+        if (!prepare_identity()) {
+            ESP_LOGW(TAG, "地址准备重试仍失败，%d 秒后再试",
+                     ADV_RETRY_DELAY_MS / 1000);
+            schedule_adv_retry();
             return;
         }
+        link_event(USAGE_LINK_EV_SYNC);   // 经状态机起广播；再失败会重新排队
+        return;
     }
-    esp_timer_stop(s_adv_retry);          // 幂等：可能已在排队
-    esp_timer_start_once(s_adv_retry, ADV_RETRY_DELAY_US);
+    if (!advertise_now()) {
+        ESP_LOGW(TAG, "广播重试仍失败，%d 秒后再试", ADV_RETRY_DELAY_MS / 1000);
+        schedule_adv_retry();
+    }
 }
 
 // 返回是否真的开始广播了。调用方必须处理 false。
@@ -246,16 +275,29 @@ static int gap_event(struct ble_gap_event *event, void *arg)
     return 0;
 }
 
-static void on_sync(void)
+static bool prepare_identity(void)
 {
     int rc = ble_hs_util_ensure_addr(0);
     if (rc != 0) {
         ESP_LOGE(TAG, "ensure_addr 失败: %d", rc);
-        return;
+        return false;
     }
     rc = ble_hs_id_infer_auto(0, &s_addr_type);
     if (rc != 0) {
         ESP_LOGE(TAG, "infer_auto 失败: %d", rc);
+        return false;
+    }
+    s_identity_ready = true;
+    return true;
+}
+
+static void on_sync(void)
+{
+    s_identity_ready = false;
+    if (!prepare_identity()) {
+        // 不能只 return：这是 host ready 后唯一的入口，没有别的事件会再来。
+        // 失败留给重试 timer，它会先补地址再经状态机起广播。
+        schedule_adv_retry();
         return;
     }
     link_event(USAGE_LINK_EV_SYNC);
@@ -266,6 +308,9 @@ static void on_reset(int reason)
     ESP_LOGW(TAG, "host reset: %d", reason);
     s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
     s_mtu = 0;
+    ble_npl_callout_stop(&s_adv_retry);   // 排队中的重试对新一轮 sync 没意义
+    s_reset_epoch++;                      // 已经出队在路上的那次也作废
+    s_identity_ready = false;    // 地址要在下一次 on_sync 重新推导
     s_state = USAGE_LINK_IDLE;   // 后续 on_sync 会重新起广播
 }
 
@@ -302,15 +347,29 @@ esp_err_t usage_link_start(void)
     ble_svc_gap_init();
     ble_svc_gatt_init();
 
-    int rc = ble_gatts_count_cfg(GATT_SVCS);
+    // 从这里起任何失败都要把 host 拆回去：留下半初始化的 NimBLE 会让下一次
+    // usage_link_start() 二次 nimble_port_init()。
+    bool callout_ready = false;
+    int rc;
+
+    // 重试 callout 挂在 host 默认事件队列上，回调因此在 host task 上跑。
+    rc = ble_npl_callout_init(&s_adv_retry, nimble_port_get_dflt_eventq(),
+                              adv_retry_cb, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "无法创建广播重试 callout: %d", rc);
+        goto fail;
+    }
+    callout_ready = true;
+
+    rc = ble_gatts_count_cfg(GATT_SVCS);
     if (rc != 0) {
         ESP_LOGE(TAG, "gatts_count_cfg 失败: %d", rc);
-        return ESP_FAIL;
+        goto fail;
     }
     rc = ble_gatts_add_svcs(GATT_SVCS);
     if (rc != 0) {
         ESP_LOGE(TAG, "gatts_add_svcs 失败: %d", rc);
-        return ESP_FAIL;
+        goto fail;
     }
 
     rc = ble_svc_gap_device_name_set(DEVICE_NAME);
@@ -323,6 +382,13 @@ esp_err_t usage_link_start(void)
     nimble_port_freertos_init(host_task);
     ESP_LOGI(TAG, "BLE 链路已启动，等待 Mac 推送");
     return ESP_OK;
+
+fail:
+    if (callout_ready) ble_npl_callout_deinit(&s_adv_retry);
+    nimble_port_deinit();
+    vSemaphoreDelete(s_mutex);
+    s_mutex = NULL;
+    return ESP_FAIL;
 }
 
 bool usage_link_get(usage_snapshot_t *out, uint32_t *out_generation)
