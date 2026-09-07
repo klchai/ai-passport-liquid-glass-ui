@@ -52,7 +52,44 @@ static bool     s_started;
 
 static int gap_event(struct ble_gap_event *event, void *arg);
 
-static void advertise(void)
+// 广播恢复重试。advertise() 失败时不能只打日志：GAP 事件是恢复的唯一入口，
+// 而没有开始广播就永远不会再有 ADV_COMPLETE/CONNECT，设备会静默地永久不可
+// 发现，只能靠重启救回来。用一个一次性 esp_timer 退避重试。
+#define ADV_RETRY_DELAY_US (2 * 1000 * 1000)
+
+static esp_timer_handle_t s_adv_retry;
+static bool advertise_now(void);
+
+static void adv_retry_cb(void *arg)
+{
+    (void)arg;
+    if (s_state == USAGE_LINK_STOPPING) return;
+    if (!advertise_now()) {
+        ESP_LOGW(TAG, "广播重试仍失败，%d 秒后再试",
+                 (int)(ADV_RETRY_DELAY_US / 1000000));
+        esp_timer_start_once(s_adv_retry, ADV_RETRY_DELAY_US);
+    }
+}
+
+static void schedule_adv_retry(void)
+{
+    if (s_state == USAGE_LINK_STOPPING) return;
+    if (!s_adv_retry) {
+        const esp_timer_create_args_t args = {
+            .callback = adv_retry_cb,
+            .name = "adv_retry",
+        };
+        if (esp_timer_create(&args, &s_adv_retry) != ESP_OK) {
+            ESP_LOGE(TAG, "无法创建广播重试 timer；设备可能保持不可发现");
+            return;
+        }
+    }
+    esp_timer_stop(s_adv_retry);          // 幂等：可能已在排队
+    esp_timer_start_once(s_adv_retry, ADV_RETRY_DELAY_US);
+}
+
+// 返回是否真的开始广播了。调用方必须处理 false。
+static bool advertise_now(void)
 {
     // 主广播：flags + 128-bit service UUID。名字放不下，见下面的 scan response。
     struct ble_hs_adv_fields fields = { 0 };
@@ -64,7 +101,7 @@ static void advertise(void)
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
         ESP_LOGE(TAG, "adv_set_fields 失败: %d", rc);
-        return;
+        return false;
     }
 
     struct ble_hs_adv_fields rsp = { 0 };
@@ -74,7 +111,7 @@ static void advertise(void)
     rc = ble_gap_adv_rsp_set_fields(&rsp);
     if (rc != 0) {
         ESP_LOGE(TAG, "adv_rsp_set_fields 失败: %d", rc);
-        return;
+        return false;
     }
 
     // 可连接、一般可发现。这是与旧 demo_ble.c 的关键差别（那里是 CONN_MODE_NON）。
@@ -84,7 +121,18 @@ static void advertise(void)
 
     rc = ble_gap_adv_start(s_addr_type, NULL, BLE_HS_FOREVER, &params,
                            gap_event, NULL);
-    if (rc != 0) ESP_LOGE(TAG, "adv_start 失败: %d", rc);
+    if (rc != 0) {
+        // BLE_HS_EALREADY 说明已经在广播，不是故障。
+        if (rc == BLE_HS_EALREADY) return true;
+        ESP_LOGE(TAG, "adv_start 失败: %d", rc);
+        return false;
+    }
+    return true;
+}
+
+static void advertise(void)
+{
+    if (!advertise_now()) schedule_adv_retry();
 }
 
 // 状态推进集中在这里：转移表是 usage_model 里的纯函数，已被 host test 覆盖。
