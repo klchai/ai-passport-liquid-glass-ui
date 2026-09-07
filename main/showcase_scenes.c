@@ -445,6 +445,12 @@ static void focus_lens_set(void *value, int32_t progress)
                                       motion->target_y, eased));
 }
 
+static void focus_motion_finish(focus_motion_t *motion)
+{
+    if (!motion || !motion->lens) return;
+    lv_obj_set_y(motion->lens, motion->target_y);
+}
+
 static void stop_scene_activity(void)
 {
     stop_scene_timer();
@@ -504,7 +510,7 @@ static void focus_move(int8_t delta)
     uint16_t duration = ui_glass_motion_duration(
         s_runtime.mode, UI_GLASS_MOTION_FOCUS);
     if (duration == 0) {
-        focus_lens_set(&s_focus_motion, UI_GLASS_MOTION_PROGRESS_MAX);
+        focus_motion_finish(&s_focus_motion);
         return;
     }
     lv_anim_t animation;
@@ -653,6 +659,18 @@ static void segment_motion_set(void *value, int32_t progress)
         -256 + progress * 1536 / UI_GLASS_MOTION_PROGRESS_MAX);
 }
 
+static void segment_motion_finish(segment_motion_t *motion)
+{
+    if (!motion || !motion->indicator) return;
+    lv_obj_set_x(motion->indicator, motion->target_x);
+    ui_glass_surface_set_glint(motion->indicator, UI_GLASS_GLINT_HIDDEN);
+}
+
+static void segment_motion_completed(lv_anim_t *animation)
+{
+    segment_motion_finish(lv_anim_get_user_data(animation));
+}
+
 static void segment_select(uint8_t index, bool animate)
 {
     if (index > 2 || !s_focus_components[0].indicator ||
@@ -676,16 +694,18 @@ static void segment_select(uint8_t index, bool animate)
     uint16_t duration = animate ? ui_glass_motion_duration(
         s_runtime.mode, UI_GLASS_MOTION_FOCUS) : 0;
     if (duration == 0) {
-        segment_motion_set(&s_segment_motion, UI_GLASS_MOTION_PROGRESS_MAX);
+        segment_motion_finish(&s_segment_motion);
         return;
     }
 
     lv_anim_t motion;
     lv_anim_init(&motion);
     lv_anim_set_var(&motion, &s_segment_motion);
+    lv_anim_set_user_data(&motion, &s_segment_motion);
     lv_anim_set_exec_cb(&motion, segment_motion_set);
     lv_anim_set_values(&motion, 0, UI_GLASS_MOTION_PROGRESS_MAX);
     lv_anim_set_duration(&motion, duration);
+    lv_anim_set_completed_cb(&motion, segment_motion_completed);
     lv_anim_start(&motion);
 }
 
@@ -884,13 +904,18 @@ static void morph_menu_refresh(bool animate)
         .start_y = lv_obj_get_y(s_morph.highlight),
         .target_y = target_y,
     };
+    uint16_t duration = ui_glass_motion_duration(
+        s_runtime.mode, UI_GLASS_MOTION_FOCUS);
+    if (duration == 0) {
+        focus_motion_finish(&s_focus_motion);
+        return;
+    }
     lv_anim_t animation;
     lv_anim_init(&animation);
     lv_anim_set_var(&animation, &s_focus_motion);
     lv_anim_set_exec_cb(&animation, focus_lens_set);
     lv_anim_set_values(&animation, 0, UI_GLASS_MOTION_PROGRESS_MAX);
-    lv_anim_set_duration(&animation, ui_glass_motion_duration(
-        s_runtime.mode, UI_GLASS_MOTION_FOCUS));
+    lv_anim_set_duration(&animation, duration);
     lv_anim_start(&animation);
 }
 
@@ -968,13 +993,20 @@ static void morph_set(void *value, int32_t progress)
     }
 }
 
-static void morph_completed(lv_anim_t *animation)
+static void morph_finish(morph_view_t *morph)
 {
-    morph_view_t *morph = lv_anim_get_user_data(animation);
     if (!morph) return;
     morph->open = morph->target_open;
     morph->animating = false;
     morph_set(morph, UI_GLASS_MOTION_PROGRESS_MAX);
+    if (morph->surface) {
+        ui_glass_surface_set_glint(morph->surface, UI_GLASS_GLINT_HIDDEN);
+    }
+}
+
+static void morph_completed(lv_anim_t *animation)
+{
+    morph_finish(lv_anim_get_user_data(animation));
 }
 
 static void morph_toggle(void)
@@ -996,9 +1028,7 @@ static void morph_toggle(void)
     uint16_t duration = ui_glass_motion_duration(
         s_runtime.mode, UI_GLASS_MOTION_MORPH);
     if (duration == 0) {
-        s_morph.open = s_morph.target_open;
-        s_morph.animating = false;
-        morph_set(&s_morph, UI_GLASS_MOTION_PROGRESS_MAX);
+        morph_finish(&s_morph);
         return;
     }
     lv_anim_t animation;
@@ -1195,9 +1225,8 @@ static void navigation_motion_set(void *value, int32_t progress)
     }
 }
 
-static void navigation_motion_completed(lv_anim_t *animation)
+static void navigation_motion_finish(navigation_view_t *navigation)
 {
-    navigation_view_t *navigation = lv_anim_get_user_data(animation);
     if (!navigation) return;
     if (!navigation->content_swapped) {
         navigation_content_update(navigation->target_index);
@@ -1207,6 +1236,11 @@ static void navigation_motion_completed(lv_anim_t *animation)
         lv_obj_set_x(navigation->content, 0);
         lv_obj_set_style_opa(navigation->content, LV_OPA_COVER, 0);
     }
+}
+
+static void navigation_motion_completed(lv_anim_t *animation)
+{
+    navigation_motion_finish(lv_anim_get_user_data(animation));
 }
 
 static void navigation_select(int8_t direction)
@@ -1228,7 +1262,7 @@ static void navigation_select(int8_t direction)
         s_runtime.mode, UI_GLASS_MOTION_FOCUS);
     if (duration == 0) {
         navigation_motion_set(&s_navigation, UI_GLASS_MOTION_PROGRESS_MAX);
-        s_navigation.animating = false;
+        navigation_motion_finish(&s_navigation);
         return;
     }
     lv_anim_t animation;
