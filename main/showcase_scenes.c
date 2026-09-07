@@ -1151,7 +1151,7 @@ static void navigation_motion_set(void *value, int32_t progress)
         navigation->start_x, navigation->target_x, spring);
     lv_obj_set_x(navigation->selection, selection_x);
     if (navigation->selection_shadow) {
-        lv_obj_set_x(navigation->selection_shadow, selection_x + 1);
+        lv_obj_set_x(navigation->selection_shadow, selection_x);
     }
     ui_glass_surface_set_glint(
         navigation->dock,
@@ -1255,14 +1255,14 @@ static void build_navigation(lv_obj_t *root)
     s_navigation.dock = reference_glass_create(
         root, 14, 168, 212, 56, UI_GLASS_RADIUS_FLOATING, 144, 1, t, NULL);
     s_navigation.selection_shadow = solid_object(
-        s_navigation.dock, 11 + s_navigation_index * 64, 7, 64, 46,
-        LV_RADIUS_CIRCLE, 0x01070D, 28);
+        s_navigation.dock, 10 + s_navigation_index * 64, 10, 64, 40,
+        UI_GLASS_RADIUS_CONTROL, 0x01070D, 28);
     s_navigation.selection = solid_object(
-        s_navigation.dock, 10 + s_navigation_index * 64, 5, 64, 46,
-        LV_RADIUS_CIRCLE, t->accent, 42);
+        s_navigation.dock, 10 + s_navigation_index * 64, 8, 64, 40,
+        UI_GLASS_RADIUS_CONTROL, t->accent, 42);
     for (uint8_t i = 0; i < 3; ++i) {
         s_navigation.tab_items[i] = text_at(
-            s_navigation.dock, tabs[i], 10 + i * 64, 11,
+            s_navigation.dock, tabs[i], 10 + i * 64, 13,
             &lv_font_montserrat_14, t->text_muted);
         lv_obj_set_width(s_navigation.tab_items[i], 64);
         lv_obj_set_style_text_align(s_navigation.tab_items[i],
