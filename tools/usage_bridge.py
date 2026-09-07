@@ -53,7 +53,8 @@ WIRE_SIZE = 94
 WIRE_VERSION = 2
 
 FLAG_KABOO_VALID = 1 << 0
-FLAG_CLAUDE_VALID = 1 << 1
+FLAG_FIVE_HOUR = 1 << 1
+FLAG_SEVEN_DAY = 1 << 2
 
 TOP_MODEL_CAP = 24
 
@@ -79,8 +80,33 @@ def _iso_to_unix(value: object) -> int:
         return 0
 
 
-def read_claude() -> tuple[bool, int, int, int, int, int]:
-    """Return (valid, sampled_unix, five_pct, seven_pct, five_reset, seven_reset).
+def _window_flags(five: dict, seven: dict, five_reset: int, seven_reset: int) -> int:
+    """Flag only the windows that carry BOTH a percent and a usable reset epoch.
+
+    The firmware runs epoch_plausible() on the reset time of every flagged
+    window and rejects the whole packet if one fails, so flagging a window
+    whose reset we could not parse would discard the other window and the
+    Kaboo data along with it. EPOCH_MIN mirrors USAGE_EPOCH_MIN in
+    main/usage_model.h (2020-01-01).
+    """
+    EPOCH_MIN = 1577836800
+    flags = 0
+    if five and five_reset >= EPOCH_MIN:
+        flags |= FLAG_FIVE_HOUR
+    if seven and seven_reset >= EPOCH_MIN:
+        flags |= FLAG_SEVEN_DAY
+    return flags
+
+
+def read_claude() -> tuple[int, int, int, int, int, int]:
+    """Return (window_flags, sampled_unix, five_pct, seven_pct, five_reset, seven_reset).
+
+    window_flags carries FLAG_FIVE_HOUR / FLAG_SEVEN_DAY for the windows this
+    source actually provided. Claude Code only emits a window while it is
+    active -- a payload with just `seven_day` is normal -- so the two are
+    reported independently. Signalling a window we do not have would make the
+    firmware reject the whole packet on its zero reset epoch, taking valid
+    Kaboo data down with it.
 
     Source order, most authoritative first:
 
@@ -106,14 +132,18 @@ def read_claude() -> tuple[bool, int, int, int, int, int]:
                 sampled = _iso_to_unix(raw.get("updated_at"))
                 if sampled == 0:
                     sampled = int(CLAUDE_SNAPSHOT.stat().st_mtime)
-                return (
-                    True,
-                    sampled,
-                    int(five.get("used_percent", 0)),
-                    int(seven.get("used_percent", 0)),
-                    _iso_to_unix(five.get("resets_at")),
-                    _iso_to_unix(seven.get("resets_at")),
-                )
+                five_reset = _iso_to_unix(five.get("resets_at"))
+                seven_reset = _iso_to_unix(seven.get("resets_at"))
+                flags = _window_flags(five, seven, five_reset, seven_reset)
+                if flags:
+                    return (
+                        flags,
+                        sampled,
+                        int(five.get("used_percent", 0)),
+                        int(seven.get("used_percent", 0)),
+                        five_reset,
+                        seven_reset,
+                    )
     except (json.JSONDecodeError, TypeError, ValueError, OSError) as exc:
         print(f"note: {CLAUDE_SNAPSHOT.name} unusable ({exc})", file=sys.stderr)
 
@@ -132,13 +162,18 @@ def read_claude() -> tuple[bool, int, int, int, int, int]:
             if not five and not seven:
                 continue
             sampled = _iso_to_unix(plan.get("fetched_at")) or int(time.time())
+            five_reset = _iso_to_unix(five.get("resets_at"))
+            seven_reset = _iso_to_unix(seven.get("resets_at"))
+            flags = _window_flags(five, seven, five_reset, seven_reset)
+            if not flags:
+                continue
             return (
-                True,
+                flags,
                 sampled,
                 int(five.get("used_percent", 0)),
                 int(seven.get("used_percent", 0)),
-                _iso_to_unix(five.get("resets_at")),
-                _iso_to_unix(seven.get("resets_at")),
+                five_reset,
+                seven_reset,
             )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError) as exc:
         print(f"note: kaboo plans unusable ({exc})", file=sys.stderr)
@@ -150,19 +185,23 @@ def read_claude() -> tuple[bool, int, int, int, int, int]:
         five = raw.get("five_hour") or {}
         seven = raw.get("seven_day") or {}
         if five or seven:
-            return (
-                True,
-                int(FLUX_RL.stat().st_mtime),
-                int(five.get("used_percentage", 0)),
-                int(seven.get("used_percentage", 0)),
-                int(five.get("resets_at", 0)),
-                int(seven.get("resets_at", 0)),
-            )
+            five_reset = int(five.get("resets_at", 0))
+            seven_reset = int(seven.get("resets_at", 0))
+            flags = _window_flags(five, seven, five_reset, seven_reset)
+            if flags:
+                return (
+                    flags,
+                    int(FLUX_RL.stat().st_mtime),
+                    int(five.get("used_percentage", 0)),
+                    int(seven.get("used_percentage", 0)),
+                    five_reset,
+                    seven_reset,
+                )
     except (json.JSONDecodeError, TypeError, ValueError, OSError) as exc:
         print(f"note: flux cache unusable ({exc})", file=sys.stderr)
 
     print("warning: no Claude quota source available", file=sys.stderr)
-    return (False, 0, 0, 0, 0, 0)
+    return (0, 0, 0, 0, 0, 0)
 
 
 def read_kaboo() -> tuple[bool, int, int, int, int, int, int, int, int, int, str]:
@@ -229,13 +268,11 @@ def build_payload() -> bytes:
     """Pack the current readings. generated_unix is stamped by the caller."""
     (k_ok, k_sampled, today, week, month, all_time,
      today_c, week_c, month_c, all_c, model) = read_kaboo()
-    c_ok, c_sampled, five, seven, five_reset, seven_reset = read_claude()
+    c_flags, c_sampled, five, seven, five_reset, seven_reset = read_claude()
 
-    flags = 0
+    flags = c_flags          # per-window Claude bits, already validated
     if k_ok:
         flags |= FLAG_KABOO_VALID
-    if c_ok:
-        flags |= FLAG_CLAUDE_VALID
 
     # Leave room for the NUL the firmware forces at index 23 regardless.
     model_bytes = model.encode("utf-8", "replace")[: TOP_MODEL_CAP - 1]
@@ -284,9 +321,17 @@ def describe(payload: bytes) -> str:
     )
 
 
-async def push(payload: bytes, timeout: float) -> bool:
+async def push(payload: bytes, timeout: float, address: str | None = None) -> bool:
+    """Push one payload. Returns False on any recoverable failure.
+
+    Never raises for an offline or flaky device: the daemon loop must survive a
+    dropped connection and retry on the next tick, and a caller that exits on
+    the first transient error would leave the display frozen on stale data
+    until someone restarts it by hand.
+    """
     try:
         from bleak import BleakClient, BleakScanner
+        from bleak.exc import BleakError
     except ImportError:
         print(
             "bleak is not installed. Install it with:\n"
@@ -295,34 +340,69 @@ async def push(payload: bytes, timeout: float) -> bool:
         )
         return False
 
-    # Filter by service UUID rather than name: several AI Passports would all
-    # advertise as FoloPassport.
-    device = await BleakScanner.find_device_by_filter(
-        lambda d, ad: SVC_UUID.lower() in [u.lower() for u in (ad.service_uuids or [])]
-        or d.name == DEVICE_NAME,
-        timeout=timeout,
-    )
-    if device is None:
-        print("device not found (is it powered on and in range?)", file=sys.stderr)
+    try:
+        if address:
+            # An explicit --device wins: the name is not an identity, and on a
+            # desk with two Passports the wrong one would silently receive this
+            # machine's usage.
+            device = await BleakScanner.find_device_by_address(
+                address, timeout=timeout
+            )
+            if device is None:
+                print(f"device {address} not found", file=sys.stderr)
+                return False
+        else:
+            # Match ONLY the service UUID. Matching the advertised name too
+            # would also accept any other Passport, including one running old
+            # firmware without this characteristic.
+            device = await BleakScanner.find_device_by_filter(
+                lambda d, ad: SVC_UUID.lower()
+                in [u.lower() for u in (ad.service_uuids or [])],
+                timeout=timeout,
+            )
+            if device is None:
+                print(
+                    "device not found (powered on? in range? "
+                    "use --device <address> to pin one)",
+                    file=sys.stderr,
+                )
+                return False
+
+        async with BleakClient(device) as client:
+            # response=True so low-MTU links use prepare/execute long write and
+            # the firmware still receives all WIRE_SIZE bytes in one callback.
+            await client.write_gatt_char(CHR_UUID, payload, response=True)
+    except (BleakError, asyncio.TimeoutError, OSError) as exc:
+        # Backends raise OSError for adapter-level trouble and BleakError for
+        # connect/write failures; both are expected when a battery-powered
+        # device wanders off.
+        print(f"push failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return False
 
-    async with BleakClient(device) as client:
-        # response=True so low-MTU links use prepare/execute long write and the
-        # firmware still receives all WIRE_SIZE bytes in one callback.
-        await client.write_gatt_char(CHR_UUID, payload, response=True)
     print(f"pushed {len(payload)} bytes to {device.address}")
     return True
 
 
 async def run(args: argparse.Namespace) -> int:
     while True:
-        payload = build_payload()
+        # build_payload reads external JSON; a corrupt or half-written file must
+        # not kill a long-running daemon either.
+        try:
+            payload = build_payload()
+        except Exception as exc:                      # noqa: BLE001
+            print(f"could not build payload: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            if args.once:
+                return 1
+            await asyncio.sleep(args.interval)
+            continue
+
         if args.dry_run:
             print(describe(payload))
             print(f"  {len(payload)} bytes: {payload.hex()}")
             return 0
 
-        ok = await push(payload, args.scan_timeout)
+        ok = await push(payload, args.scan_timeout, args.device)
         if args.once:
             return 0 if ok else 1
         await asyncio.sleep(args.interval)
@@ -339,6 +419,14 @@ def main() -> int:
     )
     parser.add_argument(
         "--scan-timeout", type=float, default=10.0, help="BLE scan timeout"
+    )
+    parser.add_argument(
+        "--device",
+        metavar="ADDRESS",
+        help="pin one device by BLE address (macOS: the CoreBluetooth UUID "
+             "printed on a successful push). Without it the first device "
+             "advertising the service UUID wins, which is ambiguous when two "
+             "Passports are in range.",
     )
     args = parser.parse_args()
 
