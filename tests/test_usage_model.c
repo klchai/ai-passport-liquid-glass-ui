@@ -303,11 +303,63 @@ static void test_link_state_machine(void)
     assert(action == USAGE_LINK_ACTION_NONE);
 }
 
+static void test_single_claude_window(void)
+{
+    uint8_t wire[USAGE_WIRE_SIZE];
+    usage_snapshot_t s;
+
+    // Claude Code 只在窗口活跃时才报它；实测出现过只有 seven_day 的情况。
+    // 那时 five_hour 的 reset 是 0，若两个窗口共用一个 valid 位，整包会因
+    // 这个 0 epoch 被拒，连同一包里有效的 Kaboo 数据一起丢掉。
+    build_valid(wire);
+    wire[1] = USAGE_FLAG_KABOO_VALID | USAGE_FLAG_SEVEN_DAY;
+    put_le32(wire + 86, 0);          // five_hour reset 缺失
+    wire[84] = 0;                    // five_hour pct 缺失
+    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_OK);
+    assert(s.flags & USAGE_FLAG_KABOO_VALID);      // Kaboo 必须存活
+    assert(s.flags & USAGE_FLAG_SEVEN_DAY);
+    assert(!(s.flags & USAGE_FLAG_FIVE_HOUR));
+    assert(s.seven_day_pct == 25);
+    assert(s.today_tokens == 144625529u);
+
+    // 反向：只有 five_hour。
+    build_valid(wire);
+    wire[1] = USAGE_FLAG_KABOO_VALID | USAGE_FLAG_FIVE_HOUR;
+    put_le32(wire + 90, 0);          // seven_day reset 缺失
+    wire[85] = 0;
+    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_OK);
+    assert(s.flags & USAGE_FLAG_FIVE_HOUR);
+    assert(!(s.flags & USAGE_FLAG_SEVEN_DAY));
+    assert(s.five_hour_pct == 13);
+
+    // 声明了某个窗口却给出损坏的 reset，仍然必须拒绝 —— 逐窗口校验不等于
+    // 放弃校验。
+    build_valid(wire);
+    wire[1] = USAGE_FLAG_KABOO_VALID | USAGE_FLAG_SEVEN_DAY;
+    put_le32(wire + 90, 100u);       // seven_day reset 早于 2020
+    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_BAD_EPOCH);
+
+    // 两个窗口都不声明：Kaboo 仍应通过。
+    build_valid(wire);
+    wire[1] = USAGE_FLAG_KABOO_VALID;
+    put_le32(wire + 86, 0);
+    put_le32(wire + 90, 0);
+    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_OK);
+    assert(!(s.flags & USAGE_FLAG_CLAUDE_VALID));
+    assert(s.today_tokens == 144625529u);
+
+    // 新的保留位掩码：bit3 及以上仍必须为 0。
+    build_valid(wire);
+    wire[1] |= 0x08;
+    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_RESERVED_FLAG);
+}
+
 int main(void)
 {
     test_golden_vector();
     test_rejects_bad_input();
     test_top_model_boundary();
+    test_single_claude_window();
     test_clock();
     test_freshness();
     test_link_state_machine();

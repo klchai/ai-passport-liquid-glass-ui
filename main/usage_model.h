@@ -15,9 +15,16 @@
 #define USAGE_TOP_MODEL_CAP  24   // 含结尾 NUL
 
 // flags 位定义。未列出的位保留，必须为 0。
+//
+// Claude 的两个配额窗口各有独立 valid 位：Claude Code 只在窗口处于活跃状态时
+// 才发出它，实测出现过只有 seven_day 的情况。用一个位覆盖两个窗口时，缺失窗口
+// 的 resets=0 会让整包 epoch 校验失败，连同一包里有效的 Kaboo 数据一起被拒。
 #define USAGE_FLAG_KABOO_VALID   (1u << 0)
-#define USAGE_FLAG_CLAUDE_VALID  (1u << 1)
-#define USAGE_FLAG_RESERVED_MASK (~(uint8_t)0x03)
+#define USAGE_FLAG_FIVE_HOUR     (1u << 1)
+#define USAGE_FLAG_SEVEN_DAY     (1u << 2)
+// 任一 Claude 窗口有效即视为该源可用（UI 用它决定显示数据还是"等待"态）。
+#define USAGE_FLAG_CLAUDE_VALID  (USAGE_FLAG_FIVE_HOUR | USAGE_FLAG_SEVEN_DAY)
+#define USAGE_FLAG_RESERVED_MASK (~(uint8_t)0x07)
 
 // 解码后的快照。字段自然对齐，不是 wire 布局的镜像 —— 解码时逐字段读，
 // 不允许把 wire buffer 直接 cast 成本结构体。

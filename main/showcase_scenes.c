@@ -1566,15 +1566,24 @@ static void refresh_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset,
     lv_label_set_text(reset, buf);
 }
 
+// 单个配额窗口无数据时的呈现：空轨道 + "--"，不是 0%。0% 是一个具体断言，
+// 而"这个窗口当前没有数据"是另一回事。
+static void blank_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset)
+{
+    lv_label_set_text(value, "--");
+    lv_obj_set_width(bar, 0);
+    lv_label_set_text(reset, "not active");
+}
+
 static void refresh_claude(const usage_snapshot_t *snap, bool have)
 {
     if (!s_claude_view.five_value) return;
 
     if (!have || !(snap->flags & USAGE_FLAG_CLAUDE_VALID)) {
-        lv_label_set_text(s_claude_view.five_value, "--");
-        lv_label_set_text(s_claude_view.seven_value, "--");
-        lv_obj_set_width(s_claude_view.five_bar, 0);
-        lv_obj_set_width(s_claude_view.seven_bar, 0);
+        blank_quota_row(s_claude_view.five_value, s_claude_view.five_bar,
+                        s_claude_view.five_reset);
+        blank_quota_row(s_claude_view.seven_value, s_claude_view.seven_bar,
+                        s_claude_view.seven_reset);
         lv_label_set_text(s_claude_view.five_reset, "");
         lv_label_set_text(s_claude_view.seven_reset, "");
         lv_label_set_text(s_claude_view.note,
@@ -1585,12 +1594,24 @@ static void refresh_claude(const usage_snapshot_t *snap, bool have)
     uint32_t now_unix = 0;
     bool have_now = usage_model_now_unix(snap, have, esp_timer_get_time(),
                                          &now_unix);
-    refresh_quota_row(s_claude_view.five_value, s_claude_view.five_bar,
-                      s_claude_view.five_reset, snap->five_hour_pct,
-                      snap->five_hour_resets_unix, now_unix, have_now);
-    refresh_quota_row(s_claude_view.seven_value, s_claude_view.seven_bar,
-                      s_claude_view.seven_reset, snap->seven_day_pct,
-                      snap->seven_day_resets_unix, now_unix, have_now);
+    // 两个窗口各自判断：Claude Code 只在窗口活跃时才报它，缺失的那个显示
+    // "not active" 而不是伪造 0%。
+    if (snap->flags & USAGE_FLAG_FIVE_HOUR) {
+        refresh_quota_row(s_claude_view.five_value, s_claude_view.five_bar,
+                          s_claude_view.five_reset, snap->five_hour_pct,
+                          snap->five_hour_resets_unix, now_unix, have_now);
+    } else {
+        blank_quota_row(s_claude_view.five_value, s_claude_view.five_bar,
+                        s_claude_view.five_reset);
+    }
+    if (snap->flags & USAGE_FLAG_SEVEN_DAY) {
+        refresh_quota_row(s_claude_view.seven_value, s_claude_view.seven_bar,
+                          s_claude_view.seven_reset, snap->seven_day_pct,
+                          snap->seven_day_resets_unix, now_unix, have_now);
+    } else {
+        blank_quota_row(s_claude_view.seven_value, s_claude_view.seven_bar,
+                        s_claude_view.seven_reset);
+    }
 
     if (have_now && !usage_model_source_fresh(snap->claude_sampled_unix,
                                               now_unix, SOURCE_TTL_SECONDS)) {

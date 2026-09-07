@@ -88,9 +88,15 @@ usage_decode_result_t usage_model_decode(const uint8_t *wire, size_t len,
     if (flags & USAGE_FLAG_KABOO_VALID) {
         if (!epoch_plausible(kaboo_sampled, generated)) return USAGE_DECODE_BAD_EPOCH;
     }
+    // 每个 Claude 窗口独立校验：只有被声明有效的那个窗口的 reset 时刻需要
+    // 合理。这样"只有 seven_day"的真实情况不会连带否掉整包。
     if (flags & USAGE_FLAG_CLAUDE_VALID) {
         if (!epoch_plausible(claude_sampled, generated)) return USAGE_DECODE_BAD_EPOCH;
+    }
+    if (flags & USAGE_FLAG_FIVE_HOUR) {
         if (!epoch_plausible(five_resets, generated)) return USAGE_DECODE_BAD_EPOCH;
+    }
+    if (flags & USAGE_FLAG_SEVEN_DAY) {
         if (!epoch_plausible(seven_resets, generated)) return USAGE_DECODE_BAD_EPOCH;
     }
 
