@@ -867,15 +867,12 @@ static void morph_set(void *value, int32_t progress)
     reference_glass_apply(morph->surface, morph->base_tint,
                           frame.opacity, morph->visual_depth);
     if (morph->shadow) {
-        int16_t expansion = morph->visual_depth;
-        lv_obj_set_pos(morph->shadow,
-                       frame.x - expansion,
-                       frame.y + 2 + morph->visual_depth);
-        lv_obj_set_size(morph->shadow,
-                        frame.width + expansion * 2,
-                        frame.height + expansion * 2);
-        lv_obj_set_style_radius(morph->shadow,
-                                frame.radius + expansion, 0);
+        // 阴影只向下偏移，不向四周放大。原来每侧外扩 visual_depth 会在展开态
+        // 露出一圈比 surface 大 4px 的圆角轮廓，读起来是"第二重边"而不是投影。
+        int16_t drop = (int16_t)(2 + morph->visual_depth);
+        lv_obj_set_pos(morph->shadow, frame.x, frame.y + drop);
+        lv_obj_set_size(morph->shadow, frame.width, frame.height);
+        lv_obj_set_style_radius(morph->shadow, frame.radius, 0);
         lv_obj_set_style_bg_opa(
             morph->shadow,
             (lv_opa_t)(30 + openness * 48 /
@@ -1056,17 +1053,20 @@ static void navigation_content_create(lv_obj_t *panel,
                                       const ui_glass_theme_t *t)
 {
     s_navigation.content = plain_object(panel, 0, 0, 212, 252);
-    solid_object(s_navigation.content, 8, 8, 196, 60, 18,
-                 0x00101C, LV_OPA_20);
+    // 标题卡与 hero 用满 content 的 212 宽，与下方 dock / footer 左右对齐
+    // （三者绝对范围都是 14..226）。缩进会让上下两组差 16px，肉眼很明显。
+    solid_object(s_navigation.content, 0, 8, 212, 60,
+                 UI_GLASS_RADIUS_PANEL, 0x00101C, LV_OPA_20);
     s_navigation.title = text_at(s_navigation.content, "", 16, 18,
                                  &lv_font_montserrat_20, t->text);
     s_navigation.subtitle = text_at(s_navigation.content, "", 16, 47,
                                     &lv_font_montserrat_14, t->text_muted);
 
-    // hero 压到 84 高、orb 56：导航条常驻后底部只剩 228，dock 要坐在 168，
-    // hero 必须在 160 前收住，否则与 dock 叠画。
-    s_navigation.hero = solid_object(s_navigation.content, 14, 76, 184, 84,
-                                     24, 0x3B93C5, LV_OPA_COVER);
+    // hero 与上方标题卡同宽同圆角，也与 dock / footer 对齐（绝对 14..226）。
+    // 高度 76 让它与 dock 之间留出 10px，而不是原来贴着的 2px。
+    s_navigation.hero = solid_object(s_navigation.content, 0, 76, 212, 76,
+                                     UI_GLASS_RADIUS_PANEL, 0x3B93C5,
+                                     LV_OPA_COVER);
     lv_obj_t *orb = solid_object(s_navigation.hero, 14, 14, 56, 56,
                                  LV_RADIUS_CIRCLE, t->text, 34);
     s_navigation.symbol = ui_glass_label(
@@ -1158,7 +1158,8 @@ static void navigation_select(int8_t direction)
     s_navigation.animating = true;
     s_navigation.direction = direction < 0 ? -1 : 1;
     s_navigation.start_x = lv_obj_get_x(s_navigation.selection);
-    s_navigation.target_x = (int16_t)(6 + next * 64);
+    // 与 build_navigation 的 tab 起点保持一致（dock 加宽后为 10）。
+    s_navigation.target_x = (int16_t)(10 + next * 64);
     s_navigation.target_index = next;
     s_navigation.content_swapped = false;
     s_navigation_index = next;
@@ -1192,21 +1193,23 @@ static void build_navigation(lv_obj_t *root)
     const ui_glass_theme_t *t = theme();
     s_navigation.panel = content_layer_create(root, 14, 6, 212, 252, t);
     navigation_content_create(s_navigation.panel, t);
-    // Dock 落在 168–224：hero 在 160 收住留 8px，footer 从 228 起留 4px。
-    // 两块玻璃不再叠画也不再贴脸。选中块只在 x 轴动画，y 固定，改这里就够了。
+    // Dock 与常驻导航条同宽（x=14, w=212）同圆角（FLOATING=22）：两块浮动玻璃
+    // 上下相邻，宽度或圆角不一致会在两者之间读出一道台阶。
+    // 三个 tab 各 64 宽，居中留边 (212-192)/2 = 10。
     s_navigation.dock_shadow = solid_object(
-        root, 16, 172, 208, 58, 30, 0x01070D, 44);
+        root, 14, 172, 212, 56, UI_GLASS_RADIUS_FLOATING,
+        0x01070D, 44);
     s_navigation.dock = reference_glass_create(
-        root, 18, 168, 204, 56, 28, 144, 1, t, NULL);
+        root, 14, 168, 212, 56, UI_GLASS_RADIUS_FLOATING, 144, 1, t, NULL);
     s_navigation.selection_shadow = solid_object(
-        s_navigation.dock, 7 + s_navigation_index * 64, 7, 64, 46,
-        23, 0x01070D, 28);
+        s_navigation.dock, 11 + s_navigation_index * 64, 7, 64, 46,
+        LV_RADIUS_CIRCLE, 0x01070D, 28);
     s_navigation.selection = solid_object(
-        s_navigation.dock, 6 + s_navigation_index * 64, 5, 64, 46,
-        23, t->accent, 42);
+        s_navigation.dock, 10 + s_navigation_index * 64, 5, 64, 46,
+        LV_RADIUS_CIRCLE, t->accent, 42);
     for (uint8_t i = 0; i < 3; ++i) {
         s_navigation.tab_items[i] = text_at(
-            s_navigation.dock, tabs[i], 6 + i * 64, 11,
+            s_navigation.dock, tabs[i], 10 + i * 64, 11,
             &lv_font_montserrat_14, t->text_muted);
         lv_obj_set_width(s_navigation.tab_items[i], 64);
         lv_obj_set_style_text_align(s_navigation.tab_items[i],
