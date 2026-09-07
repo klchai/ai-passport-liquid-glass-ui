@@ -52,9 +52,6 @@
 #define SHOWCASE_SCENE_STEP_MS  1000
 #define SHOWCASE_MAX_FOCUS        6
 
-#define SHOWCASE_BRIGHTNESS_MIN   10
-#define SHOWCASE_BRIGHTNESS_MAX  100
-#define SHOWCASE_BRIGHTNESS_STEP  10
 #define SHOWCASE_DEPTH_MIN         0
 #define SHOWCASE_DEPTH_MAX         4
 #define SHOWCASE_DEPTH_STEP        1
@@ -116,6 +113,8 @@ typedef struct {
     lv_obj_t *lens;
     int16_t start_y;
     int16_t target_y;
+    int16_t start_height;
+    int16_t target_height;
 } focus_motion_t;
 
 typedef struct {
@@ -186,6 +185,10 @@ static const char *const PAGE_TITLES[SHOWCASE_PAGE_COUNT] = {
     "Appearance",
     "Kaboo",
     "Claude",
+};
+
+static const uint8_t SHOWCASE_BRIGHTNESS_LEVELS[] = {
+    10, 40, 70, 100,
 };
 
 // The public reel starts with the two strongest content-first scenes, then
@@ -277,6 +280,7 @@ static ui_glass_focus_model_t s_focus;
 static lv_obj_t *s_focus_lens;
 static ui_glass_component_t s_focus_components[SHOWCASE_MAX_FOCUS];
 static int16_t s_focus_y[SHOWCASE_MAX_FOCUS];
+static int16_t s_focus_h[SHOWCASE_MAX_FOCUS];
 static uint8_t s_focus_count;
 
 static uint8_t s_segment_index;
@@ -462,15 +466,26 @@ static void focus_lens_set(void *value, int32_t progress)
     focus_motion_t *motion = value;
     if (!motion || !motion->lens) return;
     int32_t eased = ui_glass_spring(progress);
-    lv_obj_set_y(motion->lens,
-                 ui_glass_interpolate(motion->start_y,
-                                      motion->target_y, eased));
+    int32_t visual_y = ui_glass_interpolate(
+        motion->start_y, motion->target_y, eased);
+    int32_t visual_height = ui_glass_interpolate(
+        motion->start_height, motion->target_height, eased);
+    // Changing an object's real height on every animation tick repeatedly
+    // dirties LVGL layout and can starve the C3. Commit the fixed target height
+    // once in focus_move(), then animate only the draw-time expansion here.
+    int32_t transform_height =
+        (visual_height - motion->target_height) / 2;
+    lv_obj_set_y(motion->lens, visual_y + transform_height);
+    lv_obj_set_style_transform_height(
+        motion->lens, transform_height, LV_PART_MAIN);
 }
 
 static void focus_motion_finish(focus_motion_t *motion)
 {
     if (!motion || !motion->lens) return;
     lv_obj_set_y(motion->lens, motion->target_y);
+    lv_obj_set_height(motion->lens, motion->target_height);
+    lv_obj_set_style_transform_height(motion->lens, 0, LV_PART_MAIN);
 }
 
 static void stop_scene_activity(void)
@@ -516,7 +531,11 @@ static void focus_bind(lv_obj_t *lens, uint8_t count, uint8_t initial)
     s_focus_lens = lens;
     s_focus_count = count;
     ui_glass_focus_init(&s_focus, count, initial, true);
-    if (lens && count > 0) lv_obj_set_y(lens, s_focus_y[s_focus.index]);
+    if (lens && count > 0) {
+        lv_obj_set_y(lens, s_focus_y[s_focus.index]);
+        lv_obj_set_height(lens, s_focus_h[s_focus.index]);
+        lv_obj_set_style_transform_height(lens, 0, LV_PART_MAIN);
+    }
     focus_refresh_states();
 }
 
@@ -526,12 +545,24 @@ static void focus_move(int8_t delta)
     focus_refresh_states();
     // Rapid button input retargets the one physical lens from its current
     // sampled position instead of allowing two animations to fight over it.
+    int32_t transform_height = lv_obj_get_style_transform_height(
+        s_focus_lens, LV_PART_MAIN);
+    int16_t start_y = (int16_t)(lv_obj_get_y(s_focus_lens) -
+                                transform_height);
+    int16_t start_height = (int16_t)(lv_obj_get_height(s_focus_lens) +
+                                     transform_height * 2);
     lv_anim_delete(&s_focus_motion, focus_lens_set);
     s_focus_motion = (focus_motion_t) {
         .lens = s_focus_lens,
-        .start_y = lv_obj_get_y(s_focus_lens),
+        .start_y = start_y,
         .target_y = s_focus_y[s_focus.index],
+        .start_height = start_height,
+        .target_height = s_focus_h[s_focus.index],
     };
+    // One real size change per focus move is enough. Per-frame interpolation
+    // stays draw-only in focus_lens_set(), avoiding a layout pass per frame.
+    lv_obj_set_height(s_focus_lens, s_focus_motion.target_height);
+    focus_lens_set(&s_focus_motion, 0);
     uint16_t duration = ui_glass_motion_duration(
         s_runtime.mode, UI_GLASS_MOTION_FOCUS);
     if (duration == 0) {
@@ -593,6 +624,29 @@ static uint8_t adjustment_clamp_step(uint8_t value, int8_t direction,
                : (uint8_t)(value - step);
 }
 
+static uint8_t brightness_level_step(uint8_t value, int8_t direction)
+{
+    uint8_t count = (uint8_t)(sizeof(SHOWCASE_BRIGHTNESS_LEVELS) /
+                              sizeof(SHOWCASE_BRIGHTNESS_LEVELS[0]));
+    if (direction > 0) {
+        for (uint8_t index = 0; index < count; ++index) {
+            if (SHOWCASE_BRIGHTNESS_LEVELS[index] > value) {
+                return SHOWCASE_BRIGHTNESS_LEVELS[index];
+            }
+        }
+        return SHOWCASE_BRIGHTNESS_LEVELS[count - 1];
+    }
+    if (direction < 0) {
+        for (uint8_t index = count; index > 0; --index) {
+            if (SHOWCASE_BRIGHTNESS_LEVELS[index - 1] < value) {
+                return SHOWCASE_BRIGHTNESS_LEVELS[index - 1];
+            }
+        }
+        return SHOWCASE_BRIGHTNESS_LEVELS[0];
+    }
+    return value;
+}
+
 static void adjustments_glass_refresh(void)
 {
     for (uint8_t index = 0; index < 2; ++index) {
@@ -650,9 +704,7 @@ static void audio_volume_set_async(uint8_t volume)
 static void adjustment_change(int8_t direction)
 {
     if (s_focus.index == 0) {
-        uint8_t next = adjustment_clamp_step(
-            s_control_slider, direction, SHOWCASE_BRIGHTNESS_MIN,
-            SHOWCASE_BRIGHTNESS_MAX, SHOWCASE_BRIGHTNESS_STEP);
+        uint8_t next = brightness_level_step(s_control_slider, direction);
         if (next == s_control_slider) return;
         s_control_slider = next;
         bsp_display_backlight(s_control_slider);
@@ -936,6 +988,7 @@ static void build_buttons(lv_obj_t *root)
     };
     for (uint8_t i = 0; i < 3; ++i) {
         s_focus_y[i] = 79 + i * 40;
+        s_focus_h[i] = 42;
         s_focus_components[i] = showcase_button_create(
             stage, s_focus_y[i], labels[i], i, t);
     }
@@ -957,6 +1010,10 @@ static void build_selection(lv_obj_t *root)
     s_focus_y[1] = 54;
     s_focus_y[2] = 102;
     s_focus_y[3] = 150;
+    s_focus_h[0] = 42;
+    s_focus_h[1] = 42;
+    s_focus_h[2] = 42;
+    s_focus_h[3] = 42;
     s_focus_components[0] = showcase_segmented_create(stage, 6, t);
     s_focus_components[1] = ui_glass_toggle_create(
         stage, 6, 54, 196, 42, "Silence alerts", s_control_toggle, t);
@@ -988,6 +1045,9 @@ static void build_adjustments(lv_obj_t *root)
     s_focus_y[0] = 8;
     s_focus_y[1] = 64;
     s_focus_y[2] = 124;
+    s_focus_h[0] = 44;
+    s_focus_h[1] = 44;
+    s_focus_h[2] = 48;
     s_focus_components[0] = ui_glass_slider_create(
         stage, 6, 8, 196, 44, "Brightness", s_control_slider, t);
     s_focus_components[1] = showcase_stepper_create(stage, 64, t);
@@ -1012,6 +1072,7 @@ static void build_lists(lv_obj_t *root)
     content_divider_create(stage, 149, t);
     for (uint8_t i = 0; i < 4; ++i) {
         s_focus_y[i] = 10 + i * 47;
+        s_focus_h[i] = 42;
         s_focus_components[i] = ui_glass_row_create(
             stage, 6, s_focus_y[i], 196, 42, labels[i], values[i], t);
     }
@@ -1036,6 +1097,8 @@ static void morph_menu_refresh(bool animate)
         .lens = s_morph.highlight,
         .start_y = lv_obj_get_y(s_morph.highlight),
         .target_y = target_y,
+        .start_height = lv_obj_get_height(s_morph.highlight),
+        .target_height = lv_obj_get_height(s_morph.highlight),
     };
     uint16_t duration = ui_glass_motion_duration(
         s_runtime.mode, UI_GLASS_MOTION_FOCUS);
@@ -1546,6 +1609,7 @@ static void build_states(lv_obj_t *root)
     content_divider_create(stage, 149, t);
     for (uint8_t i = 0; i < UI_GLASS_MODE_COUNT; ++i) {
         s_focus_y[i] = 10 + i * 47;
+        s_focus_h[i] = 42;
         s_focus_components[i] = ui_glass_row_create(
             stage, 6, s_focus_y[i], 196, 42, labels[i],
             i == s_runtime.mode ? "ON" : "", t);
