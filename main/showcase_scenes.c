@@ -28,6 +28,11 @@
 #include <stdint.h>
 #include <string.h>
 
+// 无人巡航与页内自动演示：默认关闭。看板长期摆在桌上，页面自己翻走或控件
+// 自己动会干扰阅读，也让截图评审无法定格。把这两个常量改回 true 即恢复。
+#define SHOWCASE_TOUR_ENABLED  false
+#define SHOWCASE_STEPS_ENABLED false
+
 #define SHOWCASE_PAGE_COUNT      10
 #define SHOWCASE_SCENE_Y         44
 #define SHOWCASE_SCENE_HEIGHT   276
@@ -1844,7 +1849,8 @@ static void start_scene_showcase(void)
 {
     s_scene_step = 0;
     s_step_elapsed_ms = 0;
-    s_scene_done = is_data_page(s_page);
+    // 数据页没有步进表；关闭步进演示时所有页都直接标记完成。
+    s_scene_done = !SHOWCASE_STEPS_ENABLED || is_data_page(s_page);
 }
 
 static void page_transition_completed(lv_anim_t *animation)
@@ -2073,7 +2079,8 @@ void dashboard_enter(void)
 {
     s_page = SHOWCASE_OVERLAYS;
     s_transitioning = false;
-    s_tour_killed = false;
+    s_tour_killed = !SHOWCASE_TOUR_ENABLED;
+    s_scene_mode = false;   // 开机总是浏览模式，避免继承上次的模式状态
     s_tour_elapsed_ms = 0;
     s_kaboo_card = 0;
     s_card_elapsed_ms = 0;
