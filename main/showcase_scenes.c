@@ -623,9 +623,12 @@ static ui_glass_component_t showcase_segmented_create(
         component.root, 6, 2, 184, 38, UI_GLASS_RADIUS_CONTROL, t->control_tint,
         t->control_opacity, t->control_material);
     component.auxiliary = platter;
-    component.indicator = solid_object(
-        platter, 4 + s_segment_index * 59, 4, 58, 30,
-        LV_RADIUS_CIRCLE, t->accent, LV_OPA_40);
+    component.indicator = ui_glass_surface_create(
+        platter, UI_GLASS_OPTIC_RING_COUNT + s_segment_index * 59,
+        UI_GLASS_OPTIC_RING_COUNT, 58,
+        38 - UI_GLASS_OPTIC_RING_COUNT * 2, UI_GLASS_RADIUS_CONTROL,
+        t->accent, LV_OPA_90, UI_GLASS_MATERIAL_REGULAR);
+    ui_glass_surface_set_edge_strength(component.indicator, 124);
     for (uint8_t i = 0; i < 3; ++i) {
         lv_obj_t *label = text_at(platter, labels[i], 4 + i * 59, 10,
                                   &lv_font_montserrat_14,
@@ -645,6 +648,9 @@ static void segment_motion_set(void *value, int32_t progress)
     lv_obj_set_x(motion->indicator,
                  ui_glass_interpolate(motion->start_x,
                                       motion->target_x, eased));
+    ui_glass_surface_set_glint(
+        motion->indicator,
+        -256 + progress * 1536 / UI_GLASS_MOTION_PROGRESS_MAX);
 }
 
 static void segment_select(uint8_t index, bool animate)
@@ -665,7 +671,7 @@ static void segment_select(uint8_t index, bool animate)
     s_segment_motion = (segment_motion_t) {
         .indicator = s_focus_components[0].indicator,
         .start_x = lv_obj_get_x(s_focus_components[0].indicator),
-        .target_x = (int16_t)(4 + index * 59),
+        .target_x = (int16_t)(UI_GLASS_OPTIC_RING_COUNT + index * 59),
     };
     uint16_t duration = animate ? ui_glass_motion_duration(
         s_runtime.mode, UI_GLASS_MOTION_FOCUS) : 0;
