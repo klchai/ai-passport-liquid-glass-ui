@@ -627,7 +627,7 @@ static ui_glass_component_t showcase_segmented_create(
         platter, UI_GLASS_OPTIC_RING_COUNT + s_segment_index * 59,
         UI_GLASS_OPTIC_RING_COUNT, 58,
         38 - UI_GLASS_OPTIC_RING_COUNT * 2, UI_GLASS_RADIUS_CONTROL,
-        t->accent, LV_OPA_90, UI_GLASS_MATERIAL_REGULAR);
+        t->accent, LV_OPA_70, UI_GLASS_MATERIAL_REGULAR);
     ui_glass_surface_set_edge_strength(component.indicator, 124);
     for (uint8_t i = 0; i < 3; ++i) {
         lv_obj_t *label = text_at(platter, labels[i], 4 + i * 59, 10,
