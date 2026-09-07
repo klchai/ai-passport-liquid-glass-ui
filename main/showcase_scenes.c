@@ -45,6 +45,13 @@
 #define SHOWCASE_SCENE_STEP_MS  1000
 #define SHOWCASE_MAX_FOCUS        6
 
+// The compact checkbox glyph predates the three surface-radius tokens. Using
+// CONTROL=14 on 22/12 px squares would make LVGL clamp both into circles, so
+// preserve this local geometry until the design system explicitly approves a
+// compact radius token.
+#define SHOWCASE_RADIUS_CHECKBOX_OUTER 6
+#define SHOWCASE_RADIUS_CHECKBOX_INNER 3
+
 // Kaboo 卡片轮换：8 秒够读完一个大数字连同费用（4 秒在真机上被反馈为翻太快）。
 // 用户手动翻卡后暂停自动轮换一段时间，避免刚看清就被翻走。
 #define KABOO_CARD_COUNT          3
@@ -692,7 +699,7 @@ static ui_glass_component_t showcase_choice_create(
                             selected ? LV_OPA_COVER : LV_OPA_30);
     } else {
         mark = solid_object(component.root, 14, 10, 22, 22,
-                            0,
+                            SHOWCASE_RADIUS_CHECKBOX_OUTER,
                             selected ? t->accent : t->text_muted,
                             selected ? LV_OPA_COVER : LV_OPA_30);
     }
@@ -701,7 +708,8 @@ static ui_glass_component_t showcase_choice_create(
             solid_object(mark, 6, 6, 10, 10, LV_RADIUS_CIRCLE,
                          t->content_surface, LV_OPA_COVER);
         } else {
-            solid_object(mark, 5, 5, 12, 12, 0,
+            solid_object(mark, 5, 5, 12, 12,
+                         SHOWCASE_RADIUS_CHECKBOX_INNER,
                          t->content_surface, LV_OPA_COVER);
         }
     }
@@ -1242,7 +1250,7 @@ static void build_navigation(lv_obj_t *root)
     // 上下相邻，宽度或圆角不一致会在两者之间读出一道台阶。
     // 三个 tab 各 64 宽，居中留边 (212-192)/2 = 10。
     s_navigation.dock_shadow = solid_object(
-        root, 14, 172, 212, 56, UI_GLASS_RADIUS_FLOATING,
+        root, 12, 172, 216, 58, UI_GLASS_RADIUS_FLOATING,
         0x01070D, 44);
     s_navigation.dock = reference_glass_create(
         root, 14, 168, 212, 56, UI_GLASS_RADIUS_FLOATING, 144, 1, t, NULL);

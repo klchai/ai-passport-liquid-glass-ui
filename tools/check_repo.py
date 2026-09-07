@@ -27,6 +27,18 @@ ALLOWED_RADIUS_ARGS = {
     "UI_GLASS_RADIUS_PANEL",
     "UI_GLASS_RADIUS_FLOATING",
 }
+COMPACT_RADIUS_DEFINITIONS = {
+    "SHOWCASE_RADIUS_CHECKBOX_OUTER": "6",
+    "SHOWCASE_RADIUS_CHECKBOX_INNER": "3",
+}
+COMPACT_RADIUS_CALLS = {
+    "SHOWCASE_RADIUS_CHECKBOX_OUTER": (
+        "component.root", "14", "10", "22", "22",
+    ),
+    "SHOWCASE_RADIUS_CHECKBOX_INNER": (
+        "mark", "5", "5", "12", "12",
+    ),
+}
 
 
 def git_files() -> list[Path]:
@@ -225,6 +237,48 @@ def split_call_args(source: str) -> list[str]:
     return args
 
 
+def mask_c_comments_and_literals(source: str) -> str:
+    """Replace C comments and quoted literals with spaces, preserving offsets."""
+    masked = list(source)
+    index = 0
+    while index < len(source):
+        if source.startswith("//", index):
+            end = source.find("\n", index + 2)
+            if end < 0:
+                end = len(source)
+            for position in range(index, end):
+                masked[position] = " "
+            index = end
+            continue
+        if source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            end = len(source) if end < 0 else end + 2
+            for position in range(index, end):
+                if source[position] != "\n":
+                    masked[position] = " "
+            index = end
+            continue
+        if source[index] in ('"', "'"):
+            quote = source[index]
+            masked[index] = " "
+            index += 1
+            escape = False
+            while index < len(source):
+                char = source[index]
+                if char != "\n":
+                    masked[index] = " "
+                index += 1
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == quote:
+                    break
+            continue
+        index += 1
+    return "".join(masked)
+
+
 def find_matching_paren(source: str, open_index: int) -> int:
     depth = 0
     quote = None
@@ -255,35 +309,69 @@ def allowed_radius_arg(argument: str) -> bool:
     return argument in ALLOWED_RADIUS_ARGS
 
 
+def allowed_compact_radius_call(path: Path, args: list[str]) -> bool:
+    if path.name != "showcase_scenes.c" or len(args) < 6:
+        return False
+    expected = COMPACT_RADIUS_CALLS.get(args[5])
+    return expected is not None and tuple(args[:5]) == expected
+
+
 def check_radius_tokens(errors: list[str]) -> None:
     """Keep showcase rounded rectangles on the design-system radius tokens."""
     radius_arg_index = {
         "solid_object": 5,
         "reference_glass_create": 5,
     }
+    compact_uses = {name: 0 for name in COMPACT_RADIUS_CALLS}
     for path in sorted((ROOT / "main").glob("*.c")):
         text = path.read_text(encoding="utf-8")
-        for match in RADIUS_CALL_RE.finditer(text):
+        code = mask_c_comments_and_literals(text)
+        if path.name == "showcase_scenes.c":
+            for name, expected in COMPACT_RADIUS_DEFINITIONS.items():
+                definition = re.search(
+                    rf"(?m)^\s*#define\s+{re.escape(name)}\s+(\S+)", code
+                )
+                if not definition or definition.group(1) != expected:
+                    errors.append(
+                        f"{path.relative_to(ROOT)}: {name} must remain {expected} "
+                        "until a compact design token is approved"
+                    )
+        for match in RADIUS_CALL_RE.finditer(code):
             function = match.group(1)
             open_index = match.end() - 1
-            close_index = find_matching_paren(text, open_index)
+            close_index = find_matching_paren(code, open_index)
             if close_index < 0:
+                line = text.count("\n", 0, match.start()) + 1
+                errors.append(
+                    f"{path.relative_to(ROOT)}:{line}: unterminated "
+                    f"{function} call"
+                )
                 continue
             # Skip helper definitions; the next non-space token is their body.
-            if text[close_index + 1 :].lstrip().startswith("{"):
+            if code[close_index + 1 :].lstrip().startswith("{"):
                 continue
-            args = split_call_args(text[open_index + 1 : close_index])
+            args = split_call_args(code[open_index + 1 : close_index])
             arg_index = radius_arg_index[function]
             if len(args) <= arg_index:
                 continue
             radius = args[arg_index]
-            if not allowed_radius_arg(radius):
+            compact_exception = allowed_compact_radius_call(path, args)
+            if compact_exception:
+                compact_uses[radius] += 1
+            if not (allowed_radius_arg(radius) or compact_exception):
                 line = text.count("\n", 0, match.start()) + 1
                 errors.append(
                     f"{path.relative_to(ROOT)}:{line}: {function} radius must "
-                    "use UI_GLASS_RADIUS_*, LV_RADIUS_CIRCLE, or 0 "
+                    "use UI_GLASS_RADIUS_*, LV_RADIUS_CIRCLE, 0, or the "
+                    "locked compact-checkbox exception "
                     f"(got {radius})"
                 )
+    for name, count in compact_uses.items():
+        if count != 1:
+            errors.append(
+                f"main/showcase_scenes.c: {name} must be used by exactly one "
+                f"locked checkbox call (found {count})"
+            )
 
 
 def main() -> int:
