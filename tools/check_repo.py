@@ -19,7 +19,22 @@ SECRET_PATTERNS = {
     "AWS access key": re.compile(r"AKIA[0-9A-Z]{16}"),
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
 }
-RADIUS_CALL_RE = re.compile(r"\b(solid_object|reference_glass_create)\s*\(")
+RADIUS_CALL_RE = re.compile(
+    r"\b(solid_object|reference_glass_create|ui_glass_surface_create)\s*\("
+)
+# A C function definition at column 0: return type, name, parameter list, "{".
+FUNCTION_HEADER_RE = re.compile(
+    r"(?m)^(?:static\s+)?[\w\s\*]+?\b(\w+)\s*\(([^;{}]*?)\)\s*\{"
+)
+STYLE_RADIUS_RE = re.compile(r"\blv_obj_set_style_radius\s*\(")
+# The one sanctioned non-token radius argument: (file, enclosing function,
+# callee, argument). reference_glass_create() is the design-system wrapper
+# that forwards its own `radius` parameter into the glass surface it builds.
+# Any other helper, a reassigned parameter, or a wrapper called with a literal
+# has to spell a token at the call site.
+FORWARDED_RADIUS_CALLS = {
+    ("showcase_scenes.c", "reference_glass_create", "ui_glass_surface_create", "radius"),
+}
 ALLOWED_RADIUS_ARGS = {
     "0",
     "LV_RADIUS_CIRCLE",
@@ -309,6 +324,88 @@ def allowed_radius_arg(argument: str) -> bool:
     return argument in ALLOWED_RADIUS_ARGS
 
 
+def find_matching_brace(code: str, open_index: int) -> int:
+    depth = 0
+    for index in range(open_index, len(code)):
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
+
+
+def enclosing_function(
+    code: str, index: int
+) -> tuple[str, set[str], str] | None:
+    """(name, parameter names, body) of the function whose body holds `index`.
+
+    The candidate is the last column-0 definition before `index`; it only
+    counts if `index` lies inside that definition's brace block, so a call at
+    file scope after a function does not inherit its parameters.
+    """
+    header = None
+    for candidate in FUNCTION_HEADER_RE.finditer(code, 0, index):
+        header = candidate
+    if header is None:
+        return None
+    body_open = header.end() - 1
+    body_close = find_matching_brace(code, body_open)
+    if body_close < index:
+        return None
+    names: set[str] = set()
+    for parameter in header.group(2).split(","):
+        parameter = parameter.strip()
+        if not parameter or parameter == "void":
+            continue
+        names.add(re.split(r"[\s\*]+", parameter)[-1].strip("[]"))
+    return header.group(1), names, code[body_open + 1 : body_close]
+
+
+def assigns_name(body: str, name: str) -> bool:
+    """True if `body` writes to the plain variable `name` (not a member)."""
+    escaped = re.escape(name)
+    written = rf"(?<![\w.>]){escaped}\s*(?:[-+*/%&|^]|<<|>>)?=(?!=)"
+    stepped = rf"(?:\+\+|--)\s*(?<![\w.>]){escaped}\b|(?<![\w.>]){escaped}\s*(?:\+\+|--)"
+    return re.search(written, body) is not None or re.search(stepped, body) is not None
+
+
+def allowed_forwarded_radius(
+    path: Path, callee: str, radius: str, code: str, index: int
+) -> bool:
+    enclosing = enclosing_function(code, index)
+    if enclosing is None:
+        return False
+    name, parameters, body = enclosing
+    key = (path.name, name, callee, radius)
+    if key not in FORWARDED_RADIUS_CALLS or radius not in parameters:
+        return False
+    # A parameter the wrapper itself writes to is no longer a forward.
+    return not assigns_name(body, radius)
+
+
+def literal_radius(argument: str) -> int | None:
+    """The value of a bare C integer literal, or None for anything else.
+
+    Unwraps parentheses and a leading sign, accepts decimal, octal, and hex
+    with any u/l suffix, so `(17)`, `+17`, `0x11UL`, and `021` all read as 17.
+    """
+    text = argument.strip()
+    while text.startswith("(") and text.endswith(")"):
+        text = text[1:-1].strip()
+    text = text.lstrip("+-").strip()   # a signed literal is still a literal
+    match = re.fullmatch(r"(\d+|0[xX][0-9a-fA-F]+)[uUlL]{0,3}", text)
+    if not match:
+        return None
+    digits = match.group(1)
+    if digits[:2].lower() == "0x":
+        return int(digits, 16)
+    if len(digits) > 1 and digits.startswith("0"):
+        return int(digits, 8)
+    return int(digits)
+
+
 def allowed_compact_radius_call(path: Path, args: list[str]) -> bool:
     if path.name != "showcase_scenes.c" or len(args) < 6:
         return False
@@ -321,6 +418,7 @@ def check_radius_tokens(errors: list[str]) -> None:
     radius_arg_index = {
         "solid_object": 5,
         "reference_glass_create": 5,
+        "ui_glass_surface_create": 5,
     }
     compact_uses = {name: 0 for name in COMPACT_RADIUS_CALLS}
     for path in sorted((ROOT / "main").glob("*.c")):
@@ -358,13 +456,33 @@ def check_radius_tokens(errors: list[str]) -> None:
             compact_exception = allowed_compact_radius_call(path, args)
             if compact_exception:
                 compact_uses[radius] += 1
-            if not (allowed_radius_arg(radius) or compact_exception):
+            forwarded = allowed_forwarded_radius(
+                path, function, radius, code, match.start()
+            )
+            if not (allowed_radius_arg(radius) or compact_exception or forwarded):
                 line = text.count("\n", 0, match.start()) + 1
                 errors.append(
                     f"{path.relative_to(ROOT)}:{line}: {function} radius must "
-                    "use UI_GLASS_RADIUS_*, LV_RADIUS_CIRCLE, 0, or the "
-                    "locked compact-checkbox exception "
+                    "use UI_GLASS_RADIUS_*, LV_RADIUS_CIRCLE, 0, the "
+                    "reference-glass helper's forwarded radius, or the locked "
+                    "compact-checkbox exception "
                     f"(got {radius})"
+                )
+        # Direct style setters bypass every helper; a bare literal there is
+        # the same drift the helpers guard against.
+        for match in STYLE_RADIUS_RE.finditer(code):
+            open_index = match.end() - 1
+            close_index = find_matching_paren(code, open_index)
+            if close_index < 0:
+                continue
+            args = split_call_args(code[open_index + 1 : close_index])
+            value = literal_radius(args[1]) if len(args) >= 2 else None
+            if value:
+                line = text.count("\n", 0, match.start()) + 1
+                errors.append(
+                    f"{path.relative_to(ROOT)}:{line}: lv_obj_set_style_radius "
+                    f"takes a literal radius {args[1]}; use a UI_GLASS_RADIUS_* "
+                    "token"
                 )
     for name, count in compact_uses.items():
         if count != 1:
