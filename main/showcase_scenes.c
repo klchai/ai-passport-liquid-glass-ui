@@ -558,19 +558,23 @@ static ui_glass_component_t showcase_button_create(
     lv_obj_t *button;
     uint32_t text_color = t->text;
     if (style == 0) {
-        button = solid_object(component.root, 6, 1, 184, 38, 14,
+        button = solid_object(component.root, 6, 1, 184, 38,
+                              UI_GLASS_RADIUS_CONTROL,
                               t->accent, LV_OPA_COVER);
         text_color = t->content_surface;
     } else if (style == 1) {
         button = ui_glass_surface_create(
-            component.root, 6, 1, 184, 38, 14, t->control_tint,
+            component.root, 6, 1, 184, 38, UI_GLASS_RADIUS_CONTROL,
+            t->control_tint,
             t->control_opacity, t->control_material);
     } else if (style == 2) {
-        button = solid_object(component.root, 6, 1, 184, 38, 14,
+        button = solid_object(component.root, 6, 1, 184, 38,
+                              UI_GLASS_RADIUS_CONTROL,
                               t->danger, LV_OPA_30);
         text_color = t->danger;
     } else {
-        button = solid_object(component.root, 6, 1, 184, 38, 14,
+        button = solid_object(component.root, 6, 1, 184, 38,
+                              UI_GLASS_RADIUS_CONTROL,
                               t->text_muted, LV_OPA_20);
         text_color = t->text_muted;
         lv_obj_set_style_opa(button, LV_OPA_50, 0);
@@ -587,12 +591,12 @@ static ui_glass_component_t showcase_segmented_create(
     ui_glass_component_t component = { 0 };
     component.root = plain_object(parent, 6, y, 196, 42);
     lv_obj_t *platter = ui_glass_surface_create(
-        component.root, 6, 2, 184, 38, 18, t->control_tint,
+        component.root, 6, 2, 184, 38, UI_GLASS_RADIUS_CONTROL, t->control_tint,
         t->control_opacity, t->control_material);
     component.auxiliary = platter;
     component.indicator = solid_object(
         platter, 4 + s_segment_index * 59, 4, 58, 30,
-        15, t->accent, LV_OPA_40);
+        LV_RADIUS_CIRCLE, t->accent, LV_OPA_40);
     for (uint8_t i = 0; i < 3; ++i) {
         lv_obj_t *label = text_at(platter, labels[i], 4 + i * 59, 10,
                                   &lv_font_montserrat_14,
@@ -658,15 +662,26 @@ static ui_glass_component_t showcase_choice_create(
     component.root = plain_object(parent, 6, y, 196, 42);
     component.label = text_at(component.root, label, 48, 12,
                               &lv_font_montserrat_14, t->text);
-    lv_obj_t *mark = solid_object(
-        component.root, 14, 10, 22, 22, radio ? LV_RADIUS_CIRCLE : 6,
-        selected ? t->accent : t->text_muted,
-        selected ? LV_OPA_COVER : LV_OPA_30);
+    lv_obj_t *mark;
+    if (radio) {
+        mark = solid_object(component.root, 14, 10, 22, 22,
+                            LV_RADIUS_CIRCLE,
+                            selected ? t->accent : t->text_muted,
+                            selected ? LV_OPA_COVER : LV_OPA_30);
+    } else {
+        mark = solid_object(component.root, 14, 10, 22, 22,
+                            0,
+                            selected ? t->accent : t->text_muted,
+                            selected ? LV_OPA_COVER : LV_OPA_30);
+    }
     if (selected) {
-        solid_object(mark, radio ? 6 : 5, radio ? 6 : 5,
-                     radio ? 10 : 12, radio ? 10 : 12,
-                     radio ? LV_RADIUS_CIRCLE : 3,
-                     t->content_surface, LV_OPA_COVER);
+        if (radio) {
+            solid_object(mark, 6, 6, 10, 10, LV_RADIUS_CIRCLE,
+                         t->content_surface, LV_OPA_COVER);
+        } else {
+            solid_object(mark, 5, 5, 12, 12, 0,
+                         t->content_surface, LV_OPA_COVER);
+        }
     }
     component.indicator = mark;
     return component;
@@ -680,10 +695,12 @@ static ui_glass_component_t showcase_stepper_create(
     component.label = text_at(component.root, "Depth", 14, 13,
                               &lv_font_montserrat_14, t->text);
     lv_obj_t *minus = ui_glass_surface_create(
-        component.root, 108, 7, 30, 30, 12, t->control_tint,
+        component.root, 108, 7, 30, 30, UI_GLASS_RADIUS_CONTROL,
+        t->control_tint,
         t->control_opacity, t->control_material);
     lv_obj_t *plus = ui_glass_surface_create(
-        component.root, 160, 7, 30, 30, 12, t->control_tint,
+        component.root, 160, 7, 30, 30, UI_GLASS_RADIUS_CONTROL,
+        t->control_tint,
         t->control_opacity, t->control_material);
     centered_label(minus, "-", &lv_font_montserrat_14, t->text);
     centered_label(plus, "+", &lv_font_montserrat_14, t->text);
@@ -716,11 +733,12 @@ static void build_buttons(lv_obj_t *root)
 {
     const ui_glass_theme_t *t = theme();
     lv_obj_t *stage = showcase_content_stage_create(root, t);
-    lv_obj_t *art = solid_object(stage, 6, 6, 196, 70, 16,
+    lv_obj_t *art = solid_object(stage, 6, 6, 196, 70,
+                                 UI_GLASS_RADIUS_PANEL,
                                  0x174B68, LV_OPA_COVER);
     solid_object(art, 128, -18, 82, 82, LV_RADIUS_CIRCLE,
                  0x5AC8E8, LV_OPA_40);
-    solid_object(art, -12, 42, 132, 42, 18,
+    solid_object(art, -12, 42, 132, 42, UI_GLASS_RADIUS_PANEL,
                  0x343873, LV_OPA_80);
     text_at(art, "Night Drive", 14, 12,
             &lv_font_montserrat_20, t->text);
@@ -772,9 +790,9 @@ static void build_adjustments(lv_obj_t *root)
     lv_obj_t *stage = showcase_content_stage_create(root, t);
     // These are semantic control groups, not a page-sized glass card. Their
     // stable fill keeps fine slider/progress geometry legible over the image.
-    solid_object(stage, 6, 4, 196, 104, 18,
+    solid_object(stage, 6, 4, 196, 104, UI_GLASS_RADIUS_PANEL,
                  t->content_surface, content_group_opacity());
-    solid_object(stage, 6, 116, 196, 72, 18,
+    solid_object(stage, 6, 116, 196, 72, UI_GLASS_RADIUS_PANEL,
                  t->content_surface, content_group_opacity());
     content_divider_create(stage, 58, t);
     lv_obj_t *lens = ui_glass_focus_lens_create(stage, 6, 8, 196, 44, t);
@@ -924,11 +942,11 @@ static void morph_toggle(void)
     if (!s_morph.surface || s_morph.animating) return;
     ui_glass_morph_frame_t collapsed = {
         .x = 184, .y = 14, .width = 40, .height = 40,
-        .radius = 20, .opacity = 148,
+        .radius = UI_GLASS_RADIUS_CONTROL, .opacity = 148,
     };
     ui_glass_morph_frame_t expanded = {
         .x = 34, .y = 12, .width = 192, .height = 190,
-        .radius = 28, .opacity = 142,
+        .radius = UI_GLASS_RADIUS_FLOATING, .opacity = 142,
     };
     s_morph.target_open = !s_morph.open;
     s_morph.from = s_morph.open ? expanded : collapsed;
@@ -960,7 +978,8 @@ static void build_overlays(lv_obj_t *root)
     lv_obj_t *scene = lv_obj_get_parent(root);
     lv_obj_t *content = content_layer_create(root, 14, 6, 212, 252, t);
     s_morph.context = content;
-    solid_object(content, 8, 8, 196, 76, 20, 0x00101C, LV_OPA_30);
+    solid_object(content, 8, 8, 196, 76, UI_GLASS_RADIUS_PANEL,
+                 0x00101C, LV_OPA_30);
     text_at(content, "Now Playing", 16, 16,
             &lv_font_montserrat_14, t->text_muted);
     text_at(content, "Midnight Current", 16, 40,
@@ -970,7 +989,8 @@ static void build_overlays(lv_obj_t *root)
                                   : "Paused  |  24 min",
         16, 66, &lv_font_montserrat_14, t->text_muted);
 
-    lv_obj_t *art = solid_object(content, 14, 94, 184, 96, 26,
+    lv_obj_t *art = solid_object(content, 14, 94, 184, 96,
+                                 UI_GLASS_RADIUS_PANEL,
                                  0x0E4669, LV_OPA_COVER);
     lv_obj_t *orb = solid_object(art, 15, 14, 68, 68, LV_RADIUS_CIRCLE,
                                  t->accent, 88);
@@ -981,7 +1001,8 @@ static void build_overlays(lv_obj_t *root)
     for (uint8_t i = 0; i < sizeof(bar_heights); ++i) {
         int height = bar_heights[i];
         solid_object(art, 108 + i * 14, 48 - height / 2,
-                     5, height, 2, t->text, i == 2 ? 230 : 126);
+                     5, height, LV_RADIUS_CIRCLE,
+                     t->text, i == 2 ? 230 : 126);
     }
     // 两行状态文字上移 22px，让 "Connected" 收在导航条（scene-y 228）之上。
     text_at(content, LV_SYMBOL_BLUETOOTH "  Passport Speaker", 18, 185,
@@ -995,10 +1016,11 @@ static void build_overlays(lv_obj_t *root)
     lv_obj_t *overlay = plain_object(
         scene, 0, SHOWCASE_SCENE_Y,
         LIQUID_GLASS_COMPOSITOR_WIDTH, SHOWCASE_SCENE_HEIGHT);
-    s_morph.shadow = solid_object(overlay, 184, 17, 40, 40, 20,
-                                  0x01070D, 30);
+    s_morph.shadow = solid_object(overlay, 184, 17, 40, 40,
+                                  UI_GLASS_RADIUS_CONTROL, 0x01070D, 30);
     s_morph.surface = reference_glass_create(
-        overlay, 184, 14, 40, 40, 20, 148, 0, t, &s_morph.base_tint);
+        overlay, 184, 14, 40, 40, UI_GLASS_RADIUS_CONTROL,
+        148, 0, t, &s_morph.base_tint);
     s_morph.button_label = ui_glass_label(
         s_morph.surface, LV_SYMBOL_LIST, &lv_font_montserrat_14, t->text);
     lv_obj_center(s_morph.button_label);
@@ -1008,7 +1030,8 @@ static void build_overlays(lv_obj_t *root)
     text_at(s_morph.menu, "Quick Actions", 18, 16,
             &lv_font_montserrat_20, t->text);
     s_morph.highlight = solid_object(
-        s_morph.menu, 8, 48, 176, 38, 17, t->accent, 38);
+        s_morph.menu, 8, 48, 176, 38, UI_GLASS_RADIUS_CONTROL,
+        t->accent, 38);
     static const char *const rows[] = {
         LV_SYMBOL_BLUETOOTH "   Connect",
         LV_SYMBOL_AUDIO "   Sound",
@@ -1288,7 +1311,8 @@ static void build_feedback(lv_obj_t *root)
     s_feedback.status_chip = feedback_chip(
         stage, 108, 10, 82, "", t->accent, &s_feedback.status_label);
 
-    s_feedback.alert = solid_object(stage, 14, 50, 180, 52, 14,
+    s_feedback.alert = solid_object(stage, 14, 50, 180, 52,
+                                    UI_GLASS_RADIUS_PANEL,
                                     t->accent, LV_OPA_20);
     s_feedback.alert_title = text_at(
         s_feedback.alert, "", 14, 8, &lv_font_montserrat_14, t->accent);

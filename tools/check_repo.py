@@ -19,6 +19,14 @@ SECRET_PATTERNS = {
     "AWS access key": re.compile(r"AKIA[0-9A-Z]{16}"),
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
 }
+RADIUS_CALL_RE = re.compile(r"\b(solid_object|reference_glass_create)\s*\(")
+ALLOWED_RADIUS_ARGS = {
+    "0",
+    "LV_RADIUS_CIRCLE",
+    "UI_GLASS_RADIUS_CONTROL",
+    "UI_GLASS_RADIUS_PANEL",
+    "UI_GLASS_RADIUS_FLOATING",
+}
 
 
 def git_files() -> list[Path]:
@@ -179,6 +187,105 @@ def check_conflict_markers(files: list[Path], errors: list[str]) -> None:
             errors.append(f"{path.relative_to(ROOT)}: unresolved merge conflict marker")
 
 
+def split_call_args(source: str) -> list[str]:
+    args: list[str] = []
+    current: list[str] = []
+    depth = 0
+    quote = None
+    escape = False
+
+    for char in source:
+        if quote:
+            current.append(char)
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = None
+            continue
+
+        if char in ('"', "'"):
+            quote = char
+            current.append(char)
+        elif char == "(":
+            depth += 1
+            current.append(char)
+        elif char == ")":
+            depth -= 1
+            current.append(char)
+        elif char == "," and depth == 0:
+            args.append(" ".join("".join(current).split()))
+            current = []
+        else:
+            current.append(char)
+
+    if current or source.strip():
+        args.append(" ".join("".join(current).split()))
+    return args
+
+
+def find_matching_paren(source: str, open_index: int) -> int:
+    depth = 0
+    quote = None
+    escape = False
+    index = open_index
+    while index < len(source):
+        char = source[index]
+        if quote:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = None
+        elif char in ('"', "'"):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return -1
+
+
+def allowed_radius_arg(argument: str) -> bool:
+    return argument in ALLOWED_RADIUS_ARGS
+
+
+def check_radius_tokens(errors: list[str]) -> None:
+    """Keep showcase rounded rectangles on the design-system radius tokens."""
+    radius_arg_index = {
+        "solid_object": 5,
+        "reference_glass_create": 5,
+    }
+    for path in sorted((ROOT / "main").glob("*.c")):
+        text = path.read_text(encoding="utf-8")
+        for match in RADIUS_CALL_RE.finditer(text):
+            function = match.group(1)
+            open_index = match.end() - 1
+            close_index = find_matching_paren(text, open_index)
+            if close_index < 0:
+                continue
+            # Skip helper definitions; the next non-space token is their body.
+            if text[close_index + 1 :].lstrip().startswith("{"):
+                continue
+            args = split_call_args(text[open_index + 1 : close_index])
+            arg_index = radius_arg_index[function]
+            if len(args) <= arg_index:
+                continue
+            radius = args[arg_index]
+            if not allowed_radius_arg(radius):
+                line = text.count("\n", 0, match.start()) + 1
+                errors.append(
+                    f"{path.relative_to(ROOT)}:{line}: {function} radius must "
+                    "use UI_GLASS_RADIUS_*, LV_RADIUS_CIRCLE, or 0 "
+                    f"(got {radius})"
+                )
+
+
 def main() -> int:
     errors: list[str] = []
     files = text_files()
@@ -189,6 +296,7 @@ def main() -> int:
     check_issue_forms(errors)
     check_sensitive_content(files, errors)
     check_conflict_markers(files, errors)
+    check_radius_tokens(errors)
 
     if errors:
         for error in errors:
