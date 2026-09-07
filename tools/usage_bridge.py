@@ -6,11 +6,12 @@ main/usage_model.c decodes, and writes it to the device's GATT characteristic.
 
 Data sources
 ------------
-Claude quota comes from /tmp/flux-rl.json, written by the flux statusline hook
-on every Claude Code invocation. This is the authoritative source: kaboo's own
-`plans[0]` has been observed without a `quotas` key at all
-(`status: "not_configured"`), so it is only consulted as a fallback and never
-indexed blindly.
+Claude quota is read from, in order: kaboo's statusline snapshot
+(~/.claude/statusline-snapshot.json), kaboo's menubar `plans[]`, then the flux
+statusline cache (/tmp/flux-rl.json). Every source is optional and every JSON
+shape is guarded -- kaboo's `plans[0]` has been observed without a `quotas` key
+at all (`status: "not_configured"`) -- so nothing is indexed blindly and a bad
+source falls through to the next one.
 
 Kaboo token counts come from the menubar snapshot, refreshed every 5 minutes by
 the kaboo menubar agent. Note `top_model` is an object, not a string -- the
@@ -21,8 +22,9 @@ Usage
     python3 tools/usage_bridge.py --once     # single push, then exit
     python3 tools/usage_bridge.py            # push every 60 s
     python3 tools/usage_bridge.py --dry-run  # pack and print, no BLE
+    python3 tools/usage_bridge.py --device <address>   # pin one of several boards
 
-Requires bleak (pip install bleak).
+Requires bleak >= 0.19 (`uv pip install 'bleak>=0.19'`).
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import pathlib
 import struct
 import sys
@@ -80,20 +83,68 @@ def _iso_to_unix(value: object) -> int:
         return 0
 
 
-def _window_flags(five: dict, seven: dict, five_reset: int, seven_reset: int) -> int:
-    """Flag only the windows that carry BOTH a percent and a usable reset epoch.
+# Mirrors USAGE_EPOCH_MIN in main/usage_model.h (2020-01-01).
+EPOCH_MIN = 1577836800
+
+
+def _as_dict(value: object) -> dict:
+    """`value` if it is a dict, else {} -- valid JSON is free to hand us a list."""
+    return value if isinstance(value, dict) else {}
+
+
+UINT32_MAX = 0xFFFFFFFF
+
+
+def _as_int(value: object) -> int | None:
+    """An integer from JSON-ish input, or None.
+
+    bool is refused: it is an int subclass, and True read as "1%" would be a
+    fabricated reading. Finite floats and numeric strings are rounded, since
+    12.5% shown as 12% is a display choice rather than an invention. NaN,
+    inf, and anything else are None.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return None
+    if isinstance(value, float):
+        return int(round(value)) if math.isfinite(value) else None
+    return None
+
+
+def _int_or_zero(value: object) -> int:
+    """A reset epoch that fits the wire's uint32, else 0 (= not usable)."""
+    number = _as_int(value)
+    return number if number is not None and 0 <= number <= UINT32_MAX else 0
+
+
+def _percent(window: dict, key: str) -> int | None:
+    """window[key] as a 0..100 integer, or None when absent or unusable."""
+    number = _as_int(window.get(key))
+    return number if number is not None and 0 <= number <= 100 else None
+
+
+def _window_flags(
+    five_pct: int | None, seven_pct: int | None, five_reset: int, seven_reset: int
+) -> int:
+    """Flag only the windows that carry BOTH a valid percent and a usable reset.
 
     The firmware runs epoch_plausible() on the reset time of every flagged
     window and rejects the whole packet if one fails, so flagging a window
     whose reset we could not parse would discard the other window and the
-    Kaboo data along with it. EPOCH_MIN mirrors USAGE_EPOCH_MIN in
-    main/usage_model.h (2020-01-01).
+    Kaboo data along with it. A window with a reset but no percentage is the
+    mirror-image mistake: it would render as a fabricated 0% instead of
+    "not active".
     """
-    EPOCH_MIN = 1577836800
     flags = 0
-    if five and five_reset >= EPOCH_MIN:
+    if five_pct is not None and EPOCH_MIN <= five_reset <= UINT32_MAX:
         flags |= FLAG_FIVE_HOUR
-    if seven and seven_reset >= EPOCH_MIN:
+    if seven_pct is not None and EPOCH_MIN <= seven_reset <= UINT32_MAX:
         flags |= FLAG_SEVEN_DAY
     return flags
 
@@ -123,81 +174,87 @@ def read_claude() -> tuple[int, int, int, int, int, int]:
     """
     # 1. kaboo statusline snapshot.
     try:
-        raw = json.loads(CLAUDE_SNAPSHOT.read_text())
-        quotas = raw.get("quotas")
-        if isinstance(quotas, dict):
-            five = quotas.get("five_hour") or {}
-            seven = quotas.get("seven_day") or {}
-            if five or seven:
-                sampled = _iso_to_unix(raw.get("updated_at"))
-                if sampled == 0:
-                    sampled = int(CLAUDE_SNAPSHOT.stat().st_mtime)
-                five_reset = _iso_to_unix(five.get("resets_at"))
-                seven_reset = _iso_to_unix(seven.get("resets_at"))
-                flags = _window_flags(five, seven, five_reset, seven_reset)
-                if flags:
-                    return (
-                        flags,
-                        sampled,
-                        int(five.get("used_percent", 0)),
-                        int(seven.get("used_percent", 0)),
-                        five_reset,
-                        seven_reset,
-                    )
-    except (json.JSONDecodeError, TypeError, ValueError, OSError) as exc:
+        raw = _as_dict(json.loads(CLAUDE_SNAPSHOT.read_text()))
+        quotas = _as_dict(raw.get("quotas"))
+        five = _as_dict(quotas.get("five_hour"))
+        seven = _as_dict(quotas.get("seven_day"))
+        if five or seven:
+            sampled = _iso_to_unix(raw.get("updated_at"))
+            if sampled == 0:
+                sampled = int(CLAUDE_SNAPSHOT.stat().st_mtime)
+            five_pct = _percent(five, "used_percent")
+            seven_pct = _percent(seven, "used_percent")
+            five_reset = _iso_to_unix(five.get("resets_at"))
+            seven_reset = _iso_to_unix(seven.get("resets_at"))
+            flags = _window_flags(five_pct, seven_pct, five_reset, seven_reset)
+            if flags:
+                return (
+                    flags,
+                    sampled,
+                    five_pct or 0,
+                    seven_pct or 0,
+                    five_reset,
+                    seven_reset,
+                )
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError, OSError) as exc:
         print(f"note: {CLAUDE_SNAPSHOT.name} unusable ({exc})", file=sys.stderr)
 
     # 2. kaboo menubar plans. Never index blindly -- `quotas` is often missing.
     try:
-        snap = json.loads(KABOO_SNAPSHOT.read_text())["snapshot"]
-        for plan in snap.get("plans", []):
-            if not isinstance(plan, dict):
-                continue
+        snap = _as_dict(_as_dict(json.loads(KABOO_SNAPSHOT.read_text())).get("snapshot"))
+        plans = snap.get("plans")
+        for plan in plans if isinstance(plans, list) else []:
+            plan = _as_dict(plan)
             quotas = plan.get("quotas")
             if not isinstance(quotas, list):
                 continue
             by_key = {q.get("key"): q for q in quotas if isinstance(q, dict)}
-            five = by_key.get("five_hour") or {}
-            seven = by_key.get("seven_day") or {}
+            five = _as_dict(by_key.get("five_hour"))
+            seven = _as_dict(by_key.get("seven_day"))
             if not five and not seven:
                 continue
             sampled = _iso_to_unix(plan.get("fetched_at")) or int(time.time())
+            five_pct = _percent(five, "used_percent")
+            seven_pct = _percent(seven, "used_percent")
             five_reset = _iso_to_unix(five.get("resets_at"))
             seven_reset = _iso_to_unix(seven.get("resets_at"))
-            flags = _window_flags(five, seven, five_reset, seven_reset)
+            flags = _window_flags(five_pct, seven_pct, five_reset, seven_reset)
             if not flags:
                 continue
             return (
                 flags,
                 sampled,
-                int(five.get("used_percent", 0)),
-                int(seven.get("used_percent", 0)),
+                five_pct or 0,
+                seven_pct or 0,
                 five_reset,
                 seven_reset,
             )
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError) as exc:
+    except (json.JSONDecodeError, KeyError, AttributeError, TypeError, ValueError,
+            OSError) as exc:
         print(f"note: kaboo plans unusable ({exc})", file=sys.stderr)
 
     # 3. flux cache. Claude Code emits a window only while it is active, so
     #    seven_day may appear alone; treat the two independently.
     try:
-        raw = json.loads(FLUX_RL.read_text())
-        five = raw.get("five_hour") or {}
-        seven = raw.get("seven_day") or {}
+        raw = _as_dict(json.loads(FLUX_RL.read_text()))
+        five = _as_dict(raw.get("five_hour"))
+        seven = _as_dict(raw.get("seven_day"))
         if five or seven:
-            five_reset = int(five.get("resets_at", 0))
-            seven_reset = int(seven.get("resets_at", 0))
-            flags = _window_flags(five, seven, five_reset, seven_reset)
+            five_pct = _percent(five, "used_percentage")
+            seven_pct = _percent(seven, "used_percentage")
+            five_reset = _int_or_zero(five.get("resets_at"))
+            seven_reset = _int_or_zero(seven.get("resets_at"))
+            flags = _window_flags(five_pct, seven_pct, five_reset, seven_reset)
             if flags:
                 return (
                     flags,
                     int(FLUX_RL.stat().st_mtime),
-                    int(five.get("used_percentage", 0)),
-                    int(seven.get("used_percentage", 0)),
+                    five_pct or 0,
+                    seven_pct or 0,
                     five_reset,
                     seven_reset,
                 )
-    except (json.JSONDecodeError, TypeError, ValueError, OSError) as exc:
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError, OSError) as exc:
         print(f"note: flux cache unusable ({exc})", file=sys.stderr)
 
     print("warning: no Claude quota source available", file=sys.stderr)
@@ -321,6 +378,54 @@ def describe(payload: bytes) -> str:
     )
 
 
+def _advertises_service(adv: object) -> bool:
+    uuids = getattr(adv, "service_uuids", None) or []
+    return SVC_UUID.lower() in [str(uuid).lower() for uuid in uuids]
+
+
+def _pick_unique(found: dict) -> object | None:
+    """The one device advertising SVC_UUID, or None with the reason on stderr.
+
+    `found` is BleakScanner.discover(return_adv=True)'s mapping of address ->
+    (BLEDevice, AdvertisementData). Zero matches is "not found". More than one
+    is ambiguous: on a desk with two Passports the wrong one would silently
+    receive this machine's usage, so scan order must never decide -- the user
+    pins one with --device.
+    """
+    if not isinstance(found, dict):
+        # bleak < 0.19 returns a plain list from discover() and has no
+        # return_adv; without the advertisement data there is no way to tell
+        # boards apart, so say what to do rather than crash on .values().
+        print(
+            "bleak >= 0.19 is required (BleakScanner.discover(return_adv=True)); "
+            "upgrade with: uv pip install -U bleak",
+            file=sys.stderr,
+        )
+        return None
+    matches = [(dev, adv) for dev, adv in found.values() if _advertises_service(adv)]
+    if not matches:
+        print(
+            "device not found (powered on? in range? "
+            "use --device <address> to pin one)",
+            file=sys.stderr,
+        )
+        return None
+    if len(matches) > 1:
+        print(
+            f"{len(matches)} devices advertise the usage service; "
+            "pass --device <address> to choose one:",
+            file=sys.stderr,
+        )
+        for dev, adv in matches:
+            print(
+                f"  {dev.address}  {dev.name or '?'}  "
+                f"rssi={getattr(adv, 'rssi', '?')}",
+                file=sys.stderr,
+            )
+        return None
+    return matches[0][0]
+
+
 async def push(payload: bytes, timeout: float, address: str | None = None) -> bool:
     """Push one payload. Returns False on any recoverable failure.
 
@@ -352,20 +457,14 @@ async def push(payload: bytes, timeout: float, address: str | None = None) -> bo
                 print(f"device {address} not found", file=sys.stderr)
                 return False
         else:
-            # Match ONLY the service UUID. Matching the advertised name too
-            # would also accept any other Passport, including one running old
-            # firmware without this characteristic.
-            device = await BleakScanner.find_device_by_filter(
-                lambda d, ad: SVC_UUID.lower()
-                in [u.lower() for u in (ad.service_uuids or [])],
-                timeout=timeout,
-            )
+            # Match ONLY the service UUID (the advertised name is not an
+            # identity; old firmware shares it), and refuse to guess between
+            # several matches. discover() waits out the whole scan window so
+            # it sees every advertiser; find_device_by_filter() would return
+            # whichever answered first.
+            found = await BleakScanner.discover(timeout=timeout, return_adv=True)
+            device = _pick_unique(found)
             if device is None:
-                print(
-                    "device not found (powered on? in range? "
-                    "use --device <address> to pin one)",
-                    file=sys.stderr,
-                )
                 return False
 
         async with BleakClient(device) as client:
@@ -424,9 +523,9 @@ def main() -> int:
         "--device",
         metavar="ADDRESS",
         help="pin one device by BLE address (macOS: the CoreBluetooth UUID "
-             "printed on a successful push). Without it the first device "
-             "advertising the service UUID wins, which is ambiguous when two "
-             "Passports are in range.",
+             "printed on a successful push). Without it the scan must find "
+             "exactly one device advertising the service UUID; with several "
+             "in range the bridge lists them and refuses to guess.",
     )
     args = parser.parse_args()
 

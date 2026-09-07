@@ -58,6 +58,7 @@ run_static_checks() {
     PYTHONDONTWRITEBYTECODE=1 python3 tools/gen_digit_font.py --check
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_capture_screen.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_verify_firmware.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_usage_bridge.py
     rm -rf "${test_dir}"
     echo "Host tests: PASS"
 }
