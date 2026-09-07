@@ -921,15 +921,19 @@ static void morph_set(void *value, int32_t progress)
     reference_glass_apply(morph->surface, morph->base_tint,
                           frame.opacity, morph->visual_depth);
     if (morph->shadow) {
-        // 阴影只向下偏移，不向四周放大。原来每侧外扩 visual_depth 会在展开态
-        // 露出一圈比 surface 大 4px 的圆角轮廓，读起来是"第二重边"而不是投影。
-        int16_t drop = (int16_t)(2 + morph->visual_depth);
-        lv_obj_set_pos(morph->shadow, frame.x, frame.y + drop);
-        lv_obj_set_size(morph->shadow, frame.width, frame.height);
+        // 阴影留在半透明 surface 覆盖范围内，只透出纵深，不再把等大圆角轮廓
+        // 向下探出菜单外缘；否则展开态会被读成 Quick Actions 的第二重边。
+        const int16_t shadow_inset = 2;
+        const int16_t drop = 2;
+        lv_obj_set_pos(morph->shadow, frame.x + shadow_inset,
+                       frame.y + drop);
+        lv_obj_set_size(morph->shadow,
+                        frame.width - shadow_inset * 2,
+                        frame.height - shadow_inset * 2);
         lv_obj_set_style_radius(morph->shadow, frame.radius, 0);
         lv_obj_set_style_bg_opa(
             morph->shadow,
-            (lv_opa_t)(30 + openness * 48 /
+            (lv_opa_t)(24 + openness * 28 /
                        UI_GLASS_MOTION_PROGRESS_MAX), 0);
     }
     ui_glass_surface_set_glint(
@@ -977,11 +981,11 @@ static void morph_toggle(void)
 {
     if (!s_morph.surface || s_morph.animating) return;
     ui_glass_morph_frame_t collapsed = {
-        .x = 184, .y = 14, .width = 40, .height = 40,
+        .x = 178, .y = 14, .width = 40, .height = 40,
         .radius = UI_GLASS_RADIUS_CONTROL, .opacity = 148,
     };
     ui_glass_morph_frame_t expanded = {
-        .x = 34, .y = 12, .width = 192, .height = 190,
+        .x = 26, .y = 12, .width = 192, .height = 190,
         .radius = UI_GLASS_RADIUS_FLOATING, .opacity = 142,
     };
     s_morph.target_open = !s_morph.open;
@@ -1014,7 +1018,7 @@ static void build_overlays(lv_obj_t *root)
     lv_obj_t *scene = lv_obj_get_parent(root);
     lv_obj_t *content = content_layer_create(root, 14, 6, 212, 252, t);
     s_morph.context = content;
-    solid_object(content, 8, 8, 196, 76, UI_GLASS_RADIUS_PANEL,
+    solid_object(content, 0, 8, 212, 76, UI_GLASS_RADIUS_PANEL,
                  0x00101C, LV_OPA_30);
     text_at(content, "Now Playing", 16, 16,
             &lv_font_montserrat_14, t->text_muted);
@@ -1025,7 +1029,7 @@ static void build_overlays(lv_obj_t *root)
                                   : "Paused  |  24 min",
         16, 66, &lv_font_montserrat_14, t->text_muted);
 
-    lv_obj_t *art = solid_object(content, 14, 94, 184, 96,
+    lv_obj_t *art = solid_object(content, 0, 94, 212, 96,
                                  UI_GLASS_RADIUS_PANEL,
                                  0x0E4669, LV_OPA_COVER);
     lv_obj_t *orb = solid_object(art, 15, 14, 68, 68, LV_RADIUS_CIRCLE,
@@ -1040,10 +1044,10 @@ static void build_overlays(lv_obj_t *root)
                      5, height, LV_RADIUS_CIRCLE,
                      t->text, i == 2 ? 230 : 126);
     }
-    // 两行状态文字上移 22px，让 "Connected" 收在导航条（scene-y 228）之上。
-    text_at(content, LV_SYMBOL_BLUETOOTH "  Passport Speaker", 18, 185,
+    // 两行状态文字收在 footer 上沿 4px 以上，且与卡片文本保持 16px 内边距。
+    text_at(content, LV_SYMBOL_BLUETOOTH "  Passport Speaker", 16, 178,
             &lv_font_montserrat_14, t->text);
-    text_at(content, "Connected", 18, 207,
+    text_at(content, "Connected", 16, 200,
             &lv_font_montserrat_14, t->positive);
 
     s_morph.dimmer = solid_object(scene, 0, 0,
@@ -1052,10 +1056,10 @@ static void build_overlays(lv_obj_t *root)
     lv_obj_t *overlay = plain_object(
         scene, 0, SHOWCASE_SCENE_Y,
         LIQUID_GLASS_COMPOSITOR_WIDTH, SHOWCASE_SCENE_HEIGHT);
-    s_morph.shadow = solid_object(overlay, 184, 17, 40, 40,
-                                  UI_GLASS_RADIUS_CONTROL, 0x01070D, 30);
+    s_morph.shadow = solid_object(overlay, 180, 16, 36, 36,
+                                  UI_GLASS_RADIUS_CONTROL, 0x01070D, 24);
     s_morph.surface = reference_glass_create(
-        overlay, 184, 14, 40, 40, UI_GLASS_RADIUS_CONTROL,
+        overlay, 178, 14, 40, 40, UI_GLASS_RADIUS_CONTROL,
         148, 0, t, &s_morph.base_tint);
     s_morph.button_label = ui_glass_label(
         s_morph.surface, LV_SYMBOL_LIST, &lv_font_montserrat_14, t->text);
