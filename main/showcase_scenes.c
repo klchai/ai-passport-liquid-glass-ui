@@ -1270,10 +1270,8 @@ static void build_overlays(lv_obj_t *root)
                      5, height, LV_RADIUS_CIRCLE,
                      t->text, i == 2 ? 230 : 126);
     }
-    // 两行状态文字收在 footer 上沿 4px 以上，且与卡片文本保持 16px 内边距。
-    text_at(content, LV_SYMBOL_BLUETOOTH "  Passport Speaker", 16, 178,
-            &lv_font_montserrat_14, t->text);
-    text_at(content, "Connected", 16, 200,
+    // 设备名与状态共用一行，避开播放器卡片和 footer。
+    text_at(content, LV_SYMBOL_BLUETOOTH " Passport | Connected", 16, 198,
             &lv_font_montserrat_14, t->positive);
 
     s_morph.dimmer = solid_object(scene, 0, 0,
