@@ -13,9 +13,10 @@
   its shadow stays inside the semi-transparent surface instead of dropping
   below it as a second outline; and the speaker status lines clear the
   persistent nav bar. Home's dock selection is a control-radius rounded
-  rectangle inset 8 px inside the floating-radius dock, so both corners share
-  one centre instead of the old pill curving more tightly than the dock around
-  it. Focus's segmented indicator is a Regular-material glass surface at accent
+  rectangle inset 8 px vertically inside the floating-radius dock (22 − 8 =
+  14), so the corner arcs run concentric instead of the old pill curving more
+  tightly than the dock around it; the 10 px side margins centre the three
+  tabs. Focus's segmented indicator is a Regular-material glass surface at accent
   tint, inset by the optic ring count so its edge rings never land on the
   platter's, carrying the control radius and a glint sweep on selection.
 - Gave each Claude quota window its own wire flag so a payload carrying only
@@ -43,8 +44,10 @@
   header/footer, and one 200 ms master timer that now drives the 7 s tour, the
   1 s scene-step demos, Kaboo's 8 s card rotation, and BLE refresh together.
   The footer is visible on every page and names the left and right neighbour
-  pages; long-press OK and double-tap UP go left, UP goes right, and DOWN/OK
-  keep their in-scene meaning on all pages, including Kaboo's card advance.
+  pages. Keys are modal: in browse mode UP and DOWN turn pages and OK runs the
+  page's primary action (Kaboo's card advance, Player's Quick Actions); a long
+  press on OK enters scene mode on pages with in-page interaction, where
+  UP/DOWN move focus and OK acts, and another long press leaves it.
   The unattended tour skips the data pages and no longer applies an
   accessibility mode when it passes Appearance, so the theme no longer drifts
   each cycle; a manual OK on Appearance still applies one. The header keeps

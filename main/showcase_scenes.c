@@ -4,11 +4,11 @@
 // Mac 经 BLE 推来的实时数据（见 usage_link.c）。十页共用一个 runtime、一块
 // 屏幕、一套 header/footer chrome、一个 200ms 主定时器和同一个焦点/转场系统。
 //
-// 按键约定（十页统一，沿用展示场景的原则）：
-//   UP        下一页（唯一的全局翻页键）
-//   UP 双击    上一页
-//   DOWN      页内：移动焦点 / 切换页内状态（Kaboo 翻卡片）
-//   OK        执行当前焦点动作
+// 按键约定（十页统一，模态；实现见 dashboard_key）：
+//   浏览模式  UP 上一页 / DOWN 下一页；OK 执行本页主操作
+//            （Kaboo 翻卡、Player 开关 Quick Actions、其余展示页执行焦点动作）
+//   长按 OK   在有页内交互的页面进入 / 退出页内模式（header 显示 ✎）
+//   页内模式  UP / DOWN 移动焦点或切换页内状态；OK 执行焦点动作
 #include "dashboard.h"
 
 #include "ui_glass.h"
