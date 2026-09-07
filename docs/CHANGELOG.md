@@ -6,6 +6,22 @@
 
 ## Unreleased
 
+- Gave each Claude quota window its own wire flag so a payload carrying only
+  one of them is no longer rejected outright. Claude Code emits a window only
+  while it is active, and the previous single flag made the missing window's
+  zero reset epoch fail validation, discarding the valid Kaboo data in the same
+  packet. A window with no data now reads "not active" instead of a fabricated
+  0%. The Mac bridge flags a window only when it has both a percentage and a
+  usable reset time, matches devices on the service UUID alone (never the
+  advertised name, which is not an identity), accepts `--device <address>` to
+  pin one board, and survives a dropped connection or an unreadable snapshot
+  instead of exiting. A failed advertising restart now retries on a timer;
+  previously it only logged, leaving the device permanently undiscoverable
+  while the link state machine believed it was advertising.
+- Unified showcase rounded rectangles on the Glass System's control, panel,
+  and floating radius tokens while retaining explicit circles, capsules, and
+  square canvas layers. Repository checks now reject new literal radius values
+  in showcase solid and reference-glass objects.
 - Merged the eight-scene showcase and the live-data dashboard into one
   ten-page carousel: Player, Home, Focus, Controls, Devices, Activity,
   Moments, Appearance, then Kaboo token usage and Claude quota. The two data

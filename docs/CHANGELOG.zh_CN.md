@@ -6,6 +6,17 @@
 
 ## Unreleased
 
+- Claude 的两个配额窗口各自获得独立的 wire 标志位，只带一个窗口的 payload 不再被
+  整包拒绝。Claude Code 只在窗口活跃时才发出它，此前共用一个标志位会让缺失窗口的
+  零 reset 时刻校验失败，连同一包里有效的 Kaboo 数据一起丢掉。无数据的窗口现在显示
+  "not active"，而不是伪造的 0%。Mac bridge 只在某个窗口同时具备百分比与可用 reset
+  时刻时才标记它，仅按 service UUID 匹配设备（不再回退到广播名，名字不是身份），
+  支持 `--device <address>` 指定单台板卡，并且在连接中断或快照不可读时继续重试而不
+  退出。广播恢复失败现在会用 timer 重试；此前只打日志，导致链路状态机以为在广播、
+  设备却永久不可发现。
+- 将展示应用中的圆角矩形统一归档到 Glass System 的控件、内容面板与浮动层圆角
+  Token，同时保留显式圆形、胶囊与直角画布层；仓库检查现会拒绝展示实色对象与
+  reference glass 对象中新出现的字面量圆角值。
 - 把八场景展示卷与实时数据看板合并为一个十页轮播：Player、Home、Focus、Controls、
   Devices、Activity、Moments、Appearance，之后是 Kaboo token 用量与 Claude 限额。两个
   数据页的数据由配套 Mac（`tools/usage_bridge.py`）经 BLE 推送，固件内常驻一个
