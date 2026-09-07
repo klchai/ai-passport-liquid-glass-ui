@@ -1,7 +1,7 @@
 /*******************************************************************************
  * Size: 44 px
  * Bpp: 4
- * Opts: --font managed_components/lvgl__lvgl/scripts/built_in_font/Montserrat-Medium.ttf --size 44 --bpp 4 --format lvgl --symbols 0123456789:-.%BMK --lv-include lvgl.h --force-fast-kern-format --no-compress -o main/font_digits_44.c
+ * Opts: --font assets/fonts/Montserrat-Medium.ttf --size 44 --bpp 4 --format lvgl --symbols 0123456789:-.%BMK --lv-include lvgl.h --force-fast-kern-format --no-compress -o main/font_digits_44.c
  ******************************************************************************/
 
 #ifdef LV_LVGL_H_INCLUDE_SIMPLE

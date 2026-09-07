@@ -26,7 +26,12 @@ import sys
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-TTF = REPO / "managed_components/lvgl__lvgl/scripts/built_in_font/Montserrat-Medium.ttf"
+# The source face is tracked in assets/fonts/ (a copy of LVGL's own
+# Montserrat-Medium.ttf, OFL-licensed) rather than read from the gitignored
+# managed_components/ tree, so `--check` can run on a bare checkout -- which is
+# exactly what CI's static job is. A check that had to skip there would let a
+# stale font reach the firmware job, which never re-checks it.
+TTF = REPO / "assets/fonts/Montserrat-Medium.ttf"
 OUT = REPO / "main/font_digits_44.c"
 
 FONT_NAME = "font_digits_44"
@@ -113,22 +118,25 @@ def main() -> int:
         print(f"{OUT.relative_to(REPO)} is missing; run without --check", file=sys.stderr)
         return 1
 
-    # The source face lives in managed_components/, which is gitignored and only
-    # present after an ESP-IDF component resolve. A bare checkout (CI's static
-    # job, or a fresh clone) therefore cannot regenerate, and treating that as a
-    # failure would make the gate fail for a reason unrelated to the font. Skip
-    # instead, and say so loudly enough that a silent skip is not mistaken for a
-    # pass. The firmware job builds with the components resolved, so a genuinely
-    # stale font is still caught there.
+    # Both prerequisites are hard failures, never skips. The static job is the
+    # only place this check runs (the firmware job builds in a container with
+    # no Node), so a skip here would let a stale font ship with nothing else
+    # to catch it. The face is tracked, so the only way it is missing is a
+    # broken checkout; npx is present on every hosted runner and on any
+    # machine that has regenerated the font before.
     if not TTF.exists():
         print(
-            f"SKIP: {TTF.relative_to(REPO)} is absent "
-            "(managed_components not resolved); cannot verify font freshness"
+            f"{TTF.relative_to(REPO)} is missing; the source face is tracked "
+            "in git, so this checkout is incomplete",
+            file=sys.stderr,
         )
-        return 0
+        return 1
     if shutil.which("npx") is None:
-        print("SKIP: npx unavailable; cannot verify font freshness")
-        return 0
+        print(
+            "npx not found; install Node.js so the digit font can be verified",
+            file=sys.stderr,
+        )
+        return 1
 
     with tempfile.TemporaryDirectory() as tmp:
         candidate = pathlib.Path(tmp) / OUT.name
