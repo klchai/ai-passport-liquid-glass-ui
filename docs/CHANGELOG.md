@@ -6,6 +6,18 @@
 
 ## Unreleased
 
+- Fixed three showcase layout defects seen on hardware. Player's title and
+  album cards now share the 212 px content width; the Quick Actions trigger
+  sits 8 px inside the title card instead of 6 px past its edge; the expanded
+  menu keeps the trigger's right edge so it still morphs from its own origin;
+  its shadow stays inside the semi-transparent surface instead of dropping
+  below it as a second outline; and the speaker status lines clear the
+  persistent nav bar. Home's dock selection is a control-radius rounded
+  rectangle inset 8 px inside the floating-radius dock, so both corners share
+  one centre instead of the old pill curving more tightly than the dock around
+  it. Focus's segmented indicator is a Regular-material glass surface at accent
+  tint, inset by the optic ring count so its edge rings never land on the
+  platter's, carrying the control radius and a glint sweep on selection.
 - Gave each Claude quota window its own wire flag so a payload carrying only
   one of them is no longer rejected outright. Claude Code emits a window only
   while it is active, and the previous single flag made the missing window's
