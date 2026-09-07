@@ -1161,11 +1161,8 @@ static void navigation_motion_set(void *value, int32_t progress)
         navigation->start_x, navigation->target_x, spring);
     lv_obj_set_x(navigation->selection, selection_x);
     if (navigation->selection_shadow) {
-        lv_obj_set_x(navigation->selection_shadow, selection_x);
+        lv_obj_set_x(navigation->selection_shadow, selection_x + 2);
     }
-    ui_glass_surface_set_glint(
-        navigation->dock,
-        -256 + progress * 1536 / UI_GLASS_MOTION_PROGRESS_MAX);
 
     if (navigation->content) {
         if (progress < 500) {
@@ -1210,7 +1207,6 @@ static void navigation_motion_completed(lv_anim_t *animation)
         lv_obj_set_x(navigation->content, 0);
         lv_obj_set_style_opa(navigation->content, LV_OPA_COVER, 0);
     }
-    ui_glass_surface_set_glint(navigation->dock, UI_GLASS_GLINT_HIDDEN);
 }
 
 static void navigation_select(int8_t direction)
@@ -1229,7 +1225,7 @@ static void navigation_select(int8_t direction)
     navigation_refresh_tabs(next);
 
     uint16_t duration = ui_glass_motion_duration(
-        s_runtime.mode, UI_GLASS_MOTION_MORPH);
+        s_runtime.mode, UI_GLASS_MOTION_FOCUS);
     if (duration == 0) {
         navigation_motion_set(&s_navigation, UI_GLASS_MOTION_PROGRESS_MAX);
         s_navigation.animating = false;
@@ -1260,16 +1256,18 @@ static void build_navigation(lv_obj_t *root)
     // 上下相邻，宽度或圆角不一致会在两者之间读出一道台阶。
     // 三个 tab 各 64 宽，居中留边 (212-192)/2 = 10。
     s_navigation.dock_shadow = solid_object(
-        root, 12, 172, 216, 58, UI_GLASS_RADIUS_FLOATING,
+        root, 16, 170, 208, 52, UI_GLASS_RADIUS_FLOATING,
         0x01070D, 44);
     s_navigation.dock = reference_glass_create(
         root, 14, 168, 212, 56, UI_GLASS_RADIUS_FLOATING, 144, 1, t, NULL);
     s_navigation.selection_shadow = solid_object(
-        s_navigation.dock, 10 + s_navigation_index * 64, 10, 64, 40,
+        s_navigation.dock, 12 + s_navigation_index * 64, 10, 60, 36,
         UI_GLASS_RADIUS_CONTROL, 0x01070D, 28);
-    s_navigation.selection = solid_object(
+    s_navigation.selection = ui_glass_surface_create(
         s_navigation.dock, 10 + s_navigation_index * 64, 8, 64, 40,
-        UI_GLASS_RADIUS_CONTROL, t->accent, 42);
+        UI_GLASS_RADIUS_CONTROL, t->accent, LV_OPA_70,
+        UI_GLASS_MATERIAL_REGULAR);
+    ui_glass_surface_set_edge_strength(s_navigation.selection, 124);
     for (uint8_t i = 0; i < 3; ++i) {
         s_navigation.tab_items[i] = text_at(
             s_navigation.dock, tabs[i], 10 + i * 64, 13,
