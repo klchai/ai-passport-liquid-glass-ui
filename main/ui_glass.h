@@ -42,6 +42,11 @@ uint8_t ui_glass_surface_get_edge_strength(lv_obj_t *surface);
 // background compositor. The surface keeps only its moving glint draw.
 void ui_glass_surface_set_fused_edge(lv_obj_t *surface, bool fused);
 
+// Suppresses the multi-ring optical border and specular highlights during fast
+// transitions to preserve high frame rate without CPU saturation.
+void ui_glass_set_optics_suppressed(bool suppressed);
+bool ui_glass_is_optics_suppressed(void);
+
 // Updates the one-shot specular sweep. Progress may extend beyond 0..1024 so
 // the highlight enters and leaves outside the visible edge. Only the old/new
 // two-pixel highlight footprint is invalidated.

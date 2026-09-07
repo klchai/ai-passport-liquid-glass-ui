@@ -266,6 +266,7 @@ static focus_motion_t s_focus_motion;
 static morph_view_t s_morph;
 static showcase_page_t s_page;
 static bool s_transitioning;
+static ui_glass_quality_t s_saved_quality = UI_GLASS_QUALITY_FULL;
 static uint8_t s_scene_step;
 static segment_motion_t s_segment_motion;
 static lv_obj_t *s_player_state_label;
@@ -1986,8 +1987,6 @@ static void page_transition_set(void *value, int32_t progress)
     lv_obj_set_x(transition->incoming,
                  transition->direction *
                  (LIQUID_GLASS_COMPOSITOR_WIDTH - travel));
-    lv_obj_set_style_opa(transition->outgoing, LV_OPA_COVER, 0);
-    lv_obj_set_style_opa(transition->incoming, LV_OPA_COVER, 0);
 }
 
 // 步进表跑到尽头时调用；语义与原来删掉一次性 timer 相同。
@@ -2082,7 +2081,10 @@ static void page_transition_completed(lv_anim_t *animation)
     transition->outgoing = NULL;
     transition->incoming = NULL;
     s_transitioning = false;
+    ui_glass_set_optics_suppressed(false);
+    ui_glass_runtime_set_quality(&s_runtime, s_saved_quality, false);
     shell_refresh();
+    lv_obj_invalidate(s_runtime.screen);
     start_scene_showcase();
 }
 
@@ -2116,6 +2118,9 @@ static void show_page(showcase_page_t page, int8_t direction, bool animate)
     }
 
     s_transitioning = true;
+    s_saved_quality = s_runtime.quality.level;
+    ui_glass_set_optics_suppressed(true);
+    ui_glass_runtime_set_quality(&s_runtime, UI_GLASS_QUALITY_ECONOMY, true);
     s_page_motion = (page_transition_t) {
         .outgoing = old,
         .incoming = incoming,
@@ -2277,6 +2282,7 @@ void dashboard_enter(void)
 {
     s_page = SHOWCASE_OVERLAYS;
     s_transitioning = false;
+    ui_glass_set_optics_suppressed(false);
     s_tour_killed = !SHOWCASE_TOUR_ENABLED;
     s_scene_mode = false;   // 开机总是浏览模式，避免继承上次的模式状态
     s_tour_elapsed_ms = 0;
@@ -2341,6 +2347,7 @@ void dashboard_exit(void)
     stop_scene_activity();
     lv_anim_delete(&s_page_motion, page_transition_set);
     s_transitioning = false;
+    ui_glass_set_optics_suppressed(false);
     ui_glass_runtime_deinit(&s_runtime);
     s_scene = NULL;
     s_header_chrome = NULL;

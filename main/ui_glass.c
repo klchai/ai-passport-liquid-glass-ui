@@ -99,11 +99,14 @@ static void draw_segment(lv_layer_t *layer, int16_t x1, int16_t x2, int16_t y,
     lv_draw_line(layer, &line);
 }
 
+static bool s_optics_suppressed = false;
+
 static void surface_draw(lv_event_t *event)
 {
     lv_obj_t *surface = lv_event_get_target_obj(event);
     ui_glass_surface_state_t *state = lv_event_get_user_data(event);
     if (!state) return;
+    if (s_optics_suppressed) return;
 
     lv_layer_t *layer = lv_event_get_layer(event);
     lv_area_t bounds;
@@ -268,6 +271,16 @@ void ui_glass_surface_set_fused_edge(lv_obj_t *surface, bool fused)
     if (!state || state->fused_edge == fused) return;
     state->fused_edge = fused;
     invalidate_perimeter(surface);
+}
+
+void ui_glass_set_optics_suppressed(bool suppressed)
+{
+    s_optics_suppressed = suppressed;
+}
+
+bool ui_glass_is_optics_suppressed(void)
+{
+    return s_optics_suppressed;
 }
 
 void ui_glass_surface_set_glint(lv_obj_t *surface, int32_t progress)
