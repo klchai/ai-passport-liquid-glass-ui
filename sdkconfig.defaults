@@ -32,8 +32,12 @@ CONFIG_LV_COLOR_DEPTH_16=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 # LVGL 内置 malloc 池大小(KB)。它是独立静态区、不与系统堆共享,配大了会白白占用 RAM。
-# 本 demo UI 简单,24KB 足够;若自建复杂界面出现绘制卡死/看门狗,调大此值。
-CONFIG_LV_MEM_SIZE_KILOBYTES=24
+# 48KB 是实测值,不能再降回 24KB:十页轮播在转场时两套 scene 对象树同时存在,叠加
+# Kaboo 页 44px 数字字形的 A8 缓冲(单字形约 26x64 = 1.6KB,LVGL 把高度向上取整到 32
+# 的倍数),24KB 池会被打穿。池满时 lv_draw_buf_create_ex() 返回 NULL,而
+# lv_draw_label.c:647 紧接着对空指针写 header.h,taskLVGL 就死在那里、喂不上看门狗
+# (实测两次卡死 MEPC 均为同一地址)。系统启动后仍有约 136KB 空闲堆,这 24KB 增量安全。
+CONFIG_LV_MEM_SIZE_KILOBYTES=48
 
 # --- 系统 ---
 # Liquid Glass 透明合成由 ESP32-C3 CPU 执行；使用 -O2，避免默认 -Og
