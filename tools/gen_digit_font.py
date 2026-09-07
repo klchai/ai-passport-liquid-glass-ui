@@ -113,6 +113,23 @@ def main() -> int:
         print(f"{OUT.relative_to(REPO)} is missing; run without --check", file=sys.stderr)
         return 1
 
+    # The source face lives in managed_components/, which is gitignored and only
+    # present after an ESP-IDF component resolve. A bare checkout (CI's static
+    # job, or a fresh clone) therefore cannot regenerate, and treating that as a
+    # failure would make the gate fail for a reason unrelated to the font. Skip
+    # instead, and say so loudly enough that a silent skip is not mistaken for a
+    # pass. The firmware job builds with the components resolved, so a genuinely
+    # stale font is still caught there.
+    if not TTF.exists():
+        print(
+            f"SKIP: {TTF.relative_to(REPO)} is absent "
+            "(managed_components not resolved); cannot verify font freshness"
+        )
+        return 0
+    if shutil.which("npx") is None:
+        print("SKIP: npx unavailable; cannot verify font freshness")
+        return 0
+
     with tempfile.TemporaryDirectory() as tmp:
         candidate = pathlib.Path(tmp) / OUT.name
         generate(candidate)
