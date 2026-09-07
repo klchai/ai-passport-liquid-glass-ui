@@ -180,6 +180,13 @@ ui_glass_component_t ui_glass_slider_create(
         component.indicator, 0, -4, 14, 14, LV_RADIUS_CIRCLE,
         theme->accent, LV_OPA_90, UI_GLASS_MATERIAL_CLEAR);
     ui_glass_surface_set_edge_strength(component.auxiliary, 124);
+    // ui_glass_slider_set() derives the thumb position from the track's
+    // measured width, and LVGL only applies the size set above on its next
+    // layout pass. Without this the create-time call measures zero and pins
+    // the thumb to the left end, so the slider opened at 0 % whatever value
+    // it was given. Later calls from a key press ran after a layout and did
+    // move it, which is why only the initial position looked wrong.
+    lv_obj_update_layout(component.indicator);
     ui_glass_slider_set(&component, percent, theme);
     return component;
 }

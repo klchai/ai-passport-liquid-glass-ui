@@ -8,7 +8,10 @@
 //   浏览模式  UP 上一页 / DOWN 下一页；OK 执行本页主操作
 //            （Kaboo 翻卡、Player 开关 Quick Actions、其余展示页执行焦点动作）
 //   长按 OK   在有页内交互的页面进入 / 退出页内模式（header 显示 ✎）
-//   页内模式  UP / DOWN 移动焦点或切换页内状态；OK 执行焦点动作
+//   页内模式  UP / DOWN 移动焦点、调值或切换页内状态；OK 执行焦点动作
+//              （Controls 页 OK 切换控件，UP / DOWN 增减当前值）
+#include "bsp_audio.h"
+#include "bsp_display.h"
 #include "dashboard.h"
 
 #include "ui_glass.h"
@@ -18,7 +21,11 @@
 #include "ui_glass_widgets.h"
 #include "usage_link.h"
 
+#include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 #include "lvgl.h"
 
 #include <inttypes.h>
@@ -44,6 +51,16 @@
 #define SHOWCASE_TOUR_PERIOD_MS 7000
 #define SHOWCASE_SCENE_STEP_MS  1000
 #define SHOWCASE_MAX_FOCUS        6
+
+#define SHOWCASE_BRIGHTNESS_MIN   10
+#define SHOWCASE_BRIGHTNESS_MAX  100
+#define SHOWCASE_BRIGHTNESS_STEP  10
+#define SHOWCASE_DEPTH_MIN         0
+#define SHOWCASE_DEPTH_MAX         4
+#define SHOWCASE_DEPTH_STEP        1
+#define SHOWCASE_VOLUME_MIN        0
+#define SHOWCASE_VOLUME_MAX      100
+#define SHOWCASE_VOLUME_STEP      10
 
 // The compact checkbox glyph predates the three surface-radius tokens. Using
 // CONTROL=14 on 22/12 px squares would make LVGL clamp both into circles, so
@@ -265,12 +282,16 @@ static uint8_t s_segment_index;
 static bool s_control_toggle = true;
 static bool s_selection_check = true;
 static bool s_selection_radio = true;
-static uint8_t s_control_slider = 68;
+static uint8_t s_control_slider = 100;
 static uint8_t s_stepper_value = 3;
 static uint8_t s_navigation_index;
 static uint8_t s_device_volume = 70;
 static uint8_t s_feedback_state;
 static navigation_view_t s_navigation;
+static lv_obj_t *s_adjustment_surfaces[2];
+static uint32_t s_adjustment_tints[2];
+static uint8_t s_adjustment_opacities[2];
+static QueueHandle_t s_audio_volume_queue;
 
 static void navigation_motion_set(void *value, int32_t progress);
 static void segment_motion_set(void *value, int32_t progress);
@@ -465,6 +486,9 @@ static void stop_scene_activity(void)
     memset(&s_morph, 0, sizeof(s_morph));
     memset(&s_navigation, 0, sizeof(s_navigation));
     memset(&s_feedback, 0, sizeof(s_feedback));
+    memset(s_adjustment_surfaces, 0, sizeof(s_adjustment_surfaces));
+    memset(s_adjustment_tints, 0, sizeof(s_adjustment_tints));
+    memset(s_adjustment_opacities, 0, sizeof(s_adjustment_opacities));
     // 数据页的 view 指针随 scene 一起失效。refresh_data_page 靠 is_data_page
     // 门禁已经不会碰它们，清零是第二道保险，让任何越过门禁的路径都撞 NULL 而不是野指针。
     memset(&s_kaboo_view, 0, sizeof(s_kaboo_view));
@@ -553,6 +577,108 @@ static void animate_width(lv_obj_t *object, int32_t target_width)
     lv_anim_set_duration(&animation, duration);
     lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
     lv_anim_start(&animation);
+}
+
+static uint8_t adjustment_clamp_step(uint8_t value, int8_t direction,
+                                     uint8_t minimum, uint8_t maximum,
+                                     uint8_t step)
+{
+    if (direction > 0) {
+        uint16_t next = (uint16_t)value + step;
+        return next > maximum ? maximum : (uint8_t)next;
+    }
+    return value <= (uint8_t)(minimum + step - 1u)
+               ? minimum
+               : (uint8_t)(value - step);
+}
+
+static void adjustments_glass_refresh(void)
+{
+    for (uint8_t index = 0; index < 2; ++index) {
+        reference_glass_apply(
+            s_adjustment_surfaces[index], s_adjustment_tints[index],
+            s_adjustment_opacities[index], s_stepper_value);
+    }
+}
+
+static void audio_volume_task(void *context)
+{
+    (void)context;
+    esp_err_t error = bsp_audio_init();
+    bool ready = error == ESP_OK;
+    if (!ready) {
+        ESP_LOGE("showcase", "音频初始化失败，Controls 音量调节不可用: %s",
+                 esp_err_to_name(error));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    for (;;) {
+        uint8_t volume;
+        if (xQueueReceive(s_audio_volume_queue, &volume, portMAX_DELAY) ==
+            pdTRUE) {
+            bsp_audio_set_volume(volume);
+        }
+    }
+}
+
+static void audio_volume_worker_start(void)
+{
+    if (s_audio_volume_queue) return;
+    s_audio_volume_queue = xQueueCreate(1, sizeof(uint8_t));
+    if (!s_audio_volume_queue) {
+        ESP_LOGE("showcase", "无法创建音量调节队列");
+        return;
+    }
+    if (xTaskCreate(audio_volume_task, "audio_volume", 4096, NULL, 3,
+                    NULL) != pdPASS) {
+        ESP_LOGE("showcase", "无法创建音量调节任务");
+        vQueueDelete(s_audio_volume_queue);
+        s_audio_volume_queue = NULL;
+        return;
+    }
+}
+
+static void audio_volume_set_async(uint8_t volume)
+{
+    if (s_audio_volume_queue) {
+        xQueueOverwrite(s_audio_volume_queue, &volume);
+    }
+}
+
+static void adjustment_change(int8_t direction)
+{
+    if (s_focus.index == 0) {
+        uint8_t next = adjustment_clamp_step(
+            s_control_slider, direction, SHOWCASE_BRIGHTNESS_MIN,
+            SHOWCASE_BRIGHTNESS_MAX, SHOWCASE_BRIGHTNESS_STEP);
+        if (next == s_control_slider) return;
+        s_control_slider = next;
+        bsp_display_backlight(s_control_slider);
+        ui_glass_slider_set_animated(
+            &s_focus_components[0], s_control_slider, theme(),
+            ui_glass_motion_duration(s_runtime.mode, UI_GLASS_MOTION_FOCUS));
+    } else if (s_focus.index == 1) {
+        uint8_t next = adjustment_clamp_step(
+            s_stepper_value, direction, SHOWCASE_DEPTH_MIN,
+            SHOWCASE_DEPTH_MAX, SHOWCASE_DEPTH_STEP);
+        if (next == s_stepper_value) return;
+        s_stepper_value = next;
+        lv_label_set_text_fmt(s_focus_components[1].value, "%u",
+                              s_stepper_value);
+        adjustments_glass_refresh();
+    } else if (s_focus.index == 2) {
+        uint8_t next = adjustment_clamp_step(
+            s_device_volume, direction, SHOWCASE_VOLUME_MIN,
+            SHOWCASE_VOLUME_MAX, SHOWCASE_VOLUME_STEP);
+        if (next == s_device_volume) return;
+        s_device_volume = next;
+        lv_label_set_text_fmt(s_focus_components[2].value, "%u%%",
+                              s_device_volume);
+        animate_width(s_focus_components[2].indicator,
+                      168 * s_device_volume / 100);
+        audio_volume_set_async(s_device_volume);
+    }
 }
 
 static void press_focused_component(void)
@@ -844,12 +970,18 @@ static void build_adjustments(lv_obj_t *root)
 {
     const ui_glass_theme_t *t = theme();
     lv_obj_t *stage = showcase_content_stage_create(root, t);
-    // These are semantic control groups, not a page-sized glass card. Their
-    // stable fill keeps fine slider/progress geometry legible over the image.
-    solid_object(stage, 6, 4, 196, 104, UI_GLASS_RADIUS_PANEL,
-                 t->content_surface, content_group_opacity());
-    solid_object(stage, 6, 116, 196, 72, UI_GLASS_RADIUS_PANEL,
-                 t->content_surface, content_group_opacity());
+    // The two local glass groups are both legibility carriers and a live depth
+    // preview. Their high base opacity keeps the fine tracks readable while
+    // reference_glass_apply updates tint and edge strength without a rebuild.
+    uint8_t group_opacity = content_group_opacity();
+    s_adjustment_opacities[0] = group_opacity;
+    s_adjustment_opacities[1] = group_opacity;
+    s_adjustment_surfaces[0] = reference_glass_create(
+        stage, 6, 4, 196, 104, UI_GLASS_RADIUS_PANEL, group_opacity,
+        s_stepper_value, t, &s_adjustment_tints[0]);
+    s_adjustment_surfaces[1] = reference_glass_create(
+        stage, 6, 116, 196, 72, UI_GLASS_RADIUS_PANEL, group_opacity,
+        s_stepper_value, t, &s_adjustment_tints[1]);
     content_divider_create(stage, 58, t);
     lv_obj_t *lens = ui_glass_focus_lens_create(stage, 6, 8, 196, 44, t);
     s_focus_y[0] = 8;
@@ -1812,8 +1944,13 @@ static void shell_refresh(void)
                              SHOWCASE_PAGE_COUNT);
     uint8_t right = (uint8_t)((position + 1u) % SHOWCASE_PAGE_COUNT);
     if (s_scene_mode) {
-        lv_label_set_text(s_footer_label,
-                          LV_SYMBOL_UP LV_SYMBOL_DOWN "  move    OK  use");
+        if (s_page == SHOWCASE_ADJUSTMENTS) {
+            lv_label_set_text(s_footer_label,
+                              LV_SYMBOL_UP LV_SYMBOL_DOWN " adjust   OK next");
+        } else {
+            lv_label_set_text(s_footer_label,
+                              LV_SYMBOL_UP LV_SYMBOL_DOWN "  move    OK  use");
+        }
     } else {
         lv_label_set_text_fmt(
             s_footer_label, LV_SYMBOL_LEFT "  %s   %s  " LV_SYMBOL_RIGHT,
@@ -2091,26 +2228,7 @@ static void focused_action(void)
         }
         break;
     case SHOWCASE_ADJUSTMENTS:
-        if (s_focus.index == 0) {
-            s_control_slider = s_control_slider >= 92
-                                   ? 20 : s_control_slider + 18;
-            ui_glass_slider_set_animated(
-                &s_focus_components[0], s_control_slider, theme(),
-                ui_glass_motion_duration(s_runtime.mode,
-                                         UI_GLASS_MOTION_FOCUS));
-        } else if (s_focus.index == 1) {
-            s_stepper_value = s_stepper_value >= 5
-                                  ? 1 : s_stepper_value + 1;
-            lv_label_set_text_fmt(s_focus_components[1].value, "%u",
-                                  s_stepper_value);
-        } else {
-            s_device_volume = s_device_volume >= 90
-                                  ? 30 : s_device_volume + 20;
-            lv_label_set_text_fmt(s_focus_components[2].value, "%u%%",
-                                  s_device_volume);
-            animate_width(s_focus_components[2].indicator,
-                          168 * s_device_volume / 100);
-        }
+        focus_move(1);
         break;
     case SHOWCASE_LISTS:
         press_focused_component();
@@ -2204,6 +2322,11 @@ void dashboard_enter(void)
     start_scene_showcase();
     // 主定时器最后创建：此时屏幕与 chrome 都已就位，第一个 tick 就能安全刷新。
     s_tick_timer = lv_timer_create(master_tick, SHOWCASE_TICK_MS, NULL);
+    // This one-shot dashboard is the whole app, so the audio worker is
+    // intentionally app-lifetime. Codec / I2S setup is slow and optional; the
+    // worker applies the initial volume without delaying or risking UI startup.
+    audio_volume_worker_start();
+    audio_volume_set_async(s_device_volume);
 }
 
 void dashboard_exit(void)
@@ -2231,7 +2354,7 @@ void dashboard_exit(void)
     memset(&s_claude_view, 0, sizeof(s_claude_view));
 }
 
-// 页内模式下的方向键：移动焦点或切换页内状态。
+// 页内模式下的方向键：移动焦点、调值或切换页内状态。
 static void scene_step_direction(int8_t delta)
 {
     switch (s_page) {
@@ -2250,6 +2373,10 @@ static void scene_step_direction(int8_t delta)
         break;
     case SHOWCASE_NAVIGATION:
         navigation_select(delta);
+        break;
+    case SHOWCASE_ADJUSTMENTS:
+        // Physical UP raises the focused value; DOWN lowers it.
+        adjustment_change(delta < 0 ? 1 : -1);
         break;
     case SHOWCASE_FEEDBACK:
         s_feedback_state = (uint8_t)((s_feedback_state + 3u +
