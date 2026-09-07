@@ -75,6 +75,13 @@ static bool is_data_page(showcase_page_t page)
     return page >= PAGE_KABOO;
 }
 
+// 该页是否有值得进入页内模式的交互。Claude 两卡同屏、无可操作元素，
+// 长按 OK 在它上面无效。
+static bool page_has_scene_interaction(showcase_page_t page)
+{
+    return page != PAGE_CLAUDE;
+}
+
 typedef struct {
     lv_obj_t *outgoing;
     lv_obj_t *incoming;
@@ -188,6 +195,16 @@ static lv_obj_t *s_battery_label;   // 右上角电量，规范默认要求显�
 static int s_battery_soc = -1;      // app_main 开机读一次；-1 = 不可用
 static lv_obj_t *s_footer;
 static lv_obj_t *s_footer_label;
+// 按键模型分两个模式，避免同一个键在不同页面语义不同：
+//
+//   浏览模式（默认）  UP/DOWN = 上/下一页；OK = 执行当前页主操作；
+//                     长按 OK = 进入页内模式（仅当该页有页内交互）
+//   页内模式          UP/DOWN = 移焦点 / 切换页内状态；OK = 执行焦点动作；
+//                     长按 OK = 退回浏览模式
+//
+// 之前 DOWN 固定做页内操作，翻页只能靠 UP 单向 + 双击/长按回退，与"上下键
+// 翻页"的直觉冲突。现在 UP/DOWN 在浏览模式下始终是翻页。
+static bool s_scene_mode;           // true = 页内模式
 // 单一主定时器。原本的巡航 timer 与场景步进 timer 都并入它的计数器，
 // 消除了翻页时创建/销毁 timer 的竞争窗口。
 static lv_timer_t *s_tick_timer;
@@ -1728,17 +1745,30 @@ static void shell_refresh(void)
     uint8_t position = page_position(s_page);
     // 标题只放页名。"N/10" 计数会把 "Appearance" 顶到 x=190，撞上右上角
     // 168 起的电量位；位置信息由导航条的邻居页名承担。
-    lv_label_set_text(s_header_title, PAGE_TITLES[s_page]);
+    // 页内模式必须在 chrome 上可见，否则同一个键行为变了却没有任何提示。
+    if (s_scene_mode) {
+        lv_label_set_text_fmt(s_header_title, "%s " LV_SYMBOL_EDIT,
+                              PAGE_TITLES[s_page]);
+    } else {
+        lv_label_set_text(s_header_title, PAGE_TITLES[s_page]);
+    }
     set_label_color(s_header_title, t->text);
     // 导航条两侧都标出邻居页名：长按 OK / 双击 UP 去左边，UP 去右边。只写一侧会
     // 让人以为翻页是单向的。中间 3 个空格是余量：最宽的相邻对（Moments 页的
     // "Activity / Appearance"）在此格式下 187px，留 25px 给 212px 的平台。
+    // 导航条：浏览模式标出左右邻居页名（UP/DOWN 去哪）；页内模式改为提示
+    // 方向键在页内做什么、以及怎么退出，因为此时 UP/DOWN 不再翻页。
     uint8_t left = (uint8_t)((position + SHOWCASE_PAGE_COUNT - 1u) %
                              SHOWCASE_PAGE_COUNT);
     uint8_t right = (uint8_t)((position + 1u) % SHOWCASE_PAGE_COUNT);
-    lv_label_set_text_fmt(
-        s_footer_label, LV_SYMBOL_LEFT "  %s   %s  " LV_SYMBOL_RIGHT,
-        PAGE_TITLES[PAGE_ORDER[left]], PAGE_TITLES[PAGE_ORDER[right]]);
+    if (s_scene_mode) {
+        lv_label_set_text(s_footer_label,
+                          LV_SYMBOL_UP LV_SYMBOL_DOWN "  move    OK  use");
+    } else {
+        lv_label_set_text_fmt(
+            s_footer_label, LV_SYMBOL_LEFT "  %s   %s  " LV_SYMBOL_RIGHT,
+            PAGE_TITLES[PAGE_ORDER[left]], PAGE_TITLES[PAGE_ORDER[right]]);
+    }
     set_label_color(s_footer_label, t->text_muted);
     ui_glass_surface_set_tint(s_footer, t->control_tint,
                               t->control_opacity);
@@ -2151,6 +2181,37 @@ void dashboard_exit(void)
     memset(&s_claude_view, 0, sizeof(s_claude_view));
 }
 
+// 页内模式下的方向键：移动焦点或切换页内状态。
+static void scene_step_direction(int8_t delta)
+{
+    switch (s_page) {
+    case PAGE_KABOO:
+        kaboo_card_advance();
+        s_card_hold_ms = CARD_MANUAL_HOLD_MS;
+        break;
+    case SHOWCASE_OVERLAYS:
+        if (s_morph.open) {
+            s_morph.item = (uint8_t)((s_morph.item + 3u +
+                                      (delta < 0 ? -1 : 1)) % 3u);
+            morph_menu_refresh(true);
+        } else {
+            morph_toggle();          // 菜单收起时，方向键先把它打开
+        }
+        break;
+    case SHOWCASE_NAVIGATION:
+        navigation_select(delta);
+        break;
+    case SHOWCASE_FEEDBACK:
+        s_feedback_state = (uint8_t)((s_feedback_state + 3u +
+                                     (delta < 0 ? -1 : 1)) % 3u);
+        feedback_refresh(true);
+        break;
+    default:
+        focus_move(delta);
+        break;
+    }
+}
+
 void dashboard_key(bsp_btn_t button, bsp_btn_ev_t event)
 {
     // 任何按键都永久停止无人巡航，并让当前场景的自动演示让位给用户。
@@ -2158,62 +2219,54 @@ void dashboard_key(bsp_btn_t button, bsp_btn_ev_t event)
     stop_scene_timer();
     if (s_transitioning) return;
 
-    if (event == BSP_BTN_DOUBLE) {
-        if (button == BSP_BTN_UP) navigate_showcase_page(-1);
-        return;
-    }
-    // 长按 OK = 上一页。导航条左侧标着邻居页名，得有一个单次动作能去那里；
-    // 双击 UP 也行，但长按更容易被发现。原 demo 菜单的长按-返回已不存在。
+    // 长按 OK 切换模式。没有页内交互的页面（Claude）留在浏览模式。
     if (event == BSP_BTN_LONG) {
-        if (button == BSP_BTN_OK) navigate_showcase_page(-1);
+        if (button != BSP_BTN_OK) return;
+        if (s_scene_mode) {
+            s_scene_mode = false;
+        } else if (page_has_scene_interaction(s_page)) {
+            s_scene_mode = true;
+        } else {
+            return;                  // 无页内交互：不进入，也不改 chrome
+        }
+        shell_refresh();
         return;
     }
     if (event != BSP_BTN_CLICK) return;
 
-    // UP is the single, invariant page key. DOWN and OK retain contextual
-    // meaning inside each scene, so the interaction model is learnable without
-    // a help screen.
-    if (button == BSP_BTN_UP) {
-        navigate_showcase_page(1);
+    if (!s_scene_mode) {
+        // 浏览模式：UP/DOWN 就是翻页，符合三键设备的通用直觉。
+        if (button == BSP_BTN_UP) {
+            navigate_showcase_page(-1);
+        } else if (button == BSP_BTN_DOWN) {
+            navigate_showcase_page(1);
+        } else if (button == BSP_BTN_OK) {
+            // OK 在浏览模式下执行本页主操作，不需要先进页内模式。
+            if (s_page == PAGE_KABOO) {
+                kaboo_card_advance();
+                s_card_hold_ms = CARD_MANUAL_HOLD_MS;
+            } else if (s_page == SHOWCASE_OVERLAYS) {
+                morph_toggle();
+            } else if (!is_data_page(s_page)) {
+                focused_action();
+            }
+        }
         return;
     }
 
-    // 数据页沿用同一约定：DOWN 切换页内状态（照 Activity 场景的先例），
-    // OK 是焦点动作 —— Kaboo 只有一个可动的东西，就是当前卡片。
-    if (s_page == PAGE_KABOO) {
-        if (button == BSP_BTN_DOWN || button == BSP_BTN_OK) {
+    // 页内模式：方向键移焦点/切状态，OK 执行焦点动作。
+    if (button == BSP_BTN_UP) {
+        scene_step_direction(-1);
+    } else if (button == BSP_BTN_DOWN) {
+        scene_step_direction(1);
+    } else if (button == BSP_BTN_OK) {
+        if (s_page == SHOWCASE_OVERLAYS && s_morph.open) {
+            morph_toggle();
+        } else if (!is_data_page(s_page)) {
+            focused_action();
+        } else if (s_page == PAGE_KABOO) {
             kaboo_card_advance();
             s_card_hold_ms = CARD_MANUAL_HOLD_MS;
         }
-        return;
-    }
-    if (s_page == PAGE_CLAUDE) {
-        return;   // 两卡同屏无焦点，DOWN/OK 无操作
-    }
-
-    if (s_page == SHOWCASE_OVERLAYS && s_morph.open) {
-        if (button == BSP_BTN_DOWN) {
-            s_morph.item = (s_morph.item + 1u) % 3u;
-            morph_menu_refresh(true);
-        } else if (button == BSP_BTN_OK) {
-            morph_toggle();
-        }
-        return;
-    }
-
-    if (s_page == SHOWCASE_OVERLAYS && button == BSP_BTN_DOWN) {
-        morph_toggle();
-        return;
-    }
-
-    if (s_page == SHOWCASE_NAVIGATION && button == BSP_BTN_DOWN) {
-        navigation_select(1);
-    } else if (s_page == SHOWCASE_FEEDBACK && button == BSP_BTN_DOWN) {
-        s_feedback_state = (uint8_t)((s_feedback_state + 2u) % 3u);
-        feedback_refresh(true);
-    } else if (button == BSP_BTN_DOWN) {
-        focus_move(1);
-    } else if (button == BSP_BTN_OK) {
-        focused_action();
     }
 }
