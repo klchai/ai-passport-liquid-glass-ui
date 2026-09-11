@@ -294,9 +294,9 @@ static uint8_t s_navigation_index;
 static uint8_t s_device_volume = 70;
 static uint8_t s_feedback_state;
 static navigation_view_t s_navigation;
-static lv_obj_t *s_adjustment_surfaces[2];
-static uint32_t s_adjustment_tints[2];
-static uint8_t s_adjustment_opacities[2];
+static lv_obj_t *s_adjustment_surfaces[1];
+static uint32_t s_adjustment_tints[1];
+static uint8_t s_adjustment_opacities[1];
 static QueueHandle_t s_audio_volume_queue;
 
 static void navigation_motion_set(void *value, int32_t progress);
@@ -650,11 +650,9 @@ static uint8_t brightness_level_step(uint8_t value, int8_t direction)
 
 static void adjustments_glass_refresh(void)
 {
-    for (uint8_t index = 0; index < 2; ++index) {
-        reference_glass_apply(
-            s_adjustment_surfaces[index], s_adjustment_tints[index],
-            s_adjustment_opacities[index], s_stepper_value);
-    }
+    reference_glass_apply(
+        s_adjustment_surfaces[0], s_adjustment_tints[0],
+        s_adjustment_opacities[0], s_stepper_value);
 }
 
 static void audio_volume_task(void *context)
@@ -821,8 +819,11 @@ static ui_glass_component_t showcase_segmented_create(
     for (uint8_t i = 0; i < 3; ++i) {
         lv_obj_t *label = text_at(platter, labels[i], 4 + i * 59, 10,
                                   &lv_font_montserrat_14,
+                                  // 选中标签压在浅 accent 填充上，须用深色
+                                  // content_surface（与 showcase_button_create
+                                  // style 0 同一约定），近白 text 对比度不足。
                                   i == s_segment_index
-                                      ? t->text : t->text_muted);
+                                      ? t->content_surface : t->text_muted);
         lv_obj_set_width(label, 58);
         lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     }
@@ -862,7 +863,8 @@ static void segment_select(uint8_t index, bool animate)
     for (uint8_t item = 0; item < 3; ++item) {
         lv_obj_t *label = lv_obj_get_child(
             s_focus_components[0].auxiliary, (int32_t)item + 1);
-        set_label_color(label, item == index ? t->text : t->text_muted);
+        set_label_color(label, item == index ? t->content_surface
+                                             : t->text_muted);
     }
 
     lv_anim_delete(&s_segment_motion, segment_motion_set);
@@ -909,18 +911,41 @@ static ui_glass_component_t showcase_choice_create(
                             selected ? t->accent : t->text_muted,
                             selected ? LV_OPA_COVER : LV_OPA_30);
     }
-    if (selected) {
-        if (radio) {
-            solid_object(mark, 6, 6, 10, 10, LV_RADIUS_CIRCLE,
-                         t->content_surface, LV_OPA_COVER);
-        } else {
-            solid_object(mark, 5, 5, 12, 12,
-                         SHOWCASE_RADIUS_CHECKBOX_INNER,
-                         t->content_surface, LV_OPA_COVER);
-        }
+    // 内点总是创建、未选中时隐藏：原地 setter（showcase_choice_set）需要一个
+    // 始终存在的对象来切换 HIDDEN，否则选中态切换只能整页重建。
+    lv_obj_t *dot;
+    if (radio) {
+        dot = solid_object(mark, 6, 6, 10, 10, LV_RADIUS_CIRCLE,
+                           t->content_surface, LV_OPA_COVER);
+    } else {
+        dot = solid_object(mark, 5, 5, 12, 12,
+                           SHOWCASE_RADIUS_CHECKBOX_INNER,
+                           t->content_surface, LV_OPA_COVER);
     }
+    if (!selected) lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
     component.indicator = mark;
+    component.auxiliary = dot;
     return component;
+}
+
+// 原地切换 checkbox/radio 选中态，只改样式与内点可见性，不动对象树，
+// 因而焦点透镜不会因整页重建跳回第 0 行。写法参照 ui_glass_toggle_set。
+static void showcase_choice_set(ui_glass_component_t *component, bool selected,
+                                const ui_glass_theme_t *t)
+{
+    if (!component || !component->indicator || !component->auxiliary || !t) {
+        return;
+    }
+    lv_obj_set_style_bg_color(
+        component->indicator,
+        lv_color_hex(selected ? t->accent : t->text_muted), 0);
+    lv_obj_set_style_bg_opa(component->indicator,
+                            selected ? LV_OPA_COVER : LV_OPA_30, 0);
+    if (selected) {
+        lv_obj_remove_flag(component->auxiliary, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(component->auxiliary, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static ui_glass_component_t showcase_stepper_create(
@@ -951,7 +976,7 @@ static ui_glass_component_t showcase_progress_create(
     const ui_glass_theme_t *t)
 {
     ui_glass_component_t component = { 0 };
-    component.root = plain_object(parent, 6, y, 196, 48);
+    component.root = plain_object(parent, 6, y, 196, 44);
     component.label = text_at(component.root, label, 14, 3,
                               &lv_font_montserrat_14, t->text);
     component.value = text_at(component.root, "0%", 154, 3,
@@ -1029,31 +1054,28 @@ static void build_adjustments(lv_obj_t *root)
 {
     const ui_glass_theme_t *t = theme();
     lv_obj_t *stage = showcase_content_stage_create(root, t);
-    // The two local glass groups are both legibility carriers and a live depth
-    // preview. Their high base opacity keeps the fine tracks readable while
+    // The local glass group is both legibility carrier and a live depth
+    // preview. Its high base opacity keeps the fine tracks readable while
     // reference_glass_apply updates tint and edge strength without a rebuild.
     uint8_t group_opacity = content_group_opacity();
     s_adjustment_opacities[0] = group_opacity;
-    s_adjustment_opacities[1] = group_opacity;
     s_adjustment_surfaces[0] = reference_glass_create(
-        stage, 6, 4, 196, 104, UI_GLASS_RADIUS_PANEL, group_opacity,
+        stage, 6, 4, 196, 164, UI_GLASS_RADIUS_PANEL, group_opacity,
         s_stepper_value, t, &s_adjustment_tints[0]);
-    s_adjustment_surfaces[1] = reference_glass_create(
-        stage, 6, 116, 196, 72, UI_GLASS_RADIUS_PANEL, group_opacity,
-        s_stepper_value, t, &s_adjustment_tints[1]);
     content_divider_create(stage, 58, t);
+    content_divider_create(stage, 114, t);
     lv_obj_t *lens = ui_glass_focus_lens_create(stage, 6, 8, 196, 44, t);
     s_focus_y[0] = 8;
     s_focus_y[1] = 64;
-    s_focus_y[2] = 124;
+    s_focus_y[2] = 120;
     s_focus_h[0] = 44;
     s_focus_h[1] = 44;
-    s_focus_h[2] = 48;
+    s_focus_h[2] = 44;
     s_focus_components[0] = ui_glass_slider_create(
         stage, 6, 8, 196, 44, "Brightness", s_control_slider, t);
     s_focus_components[1] = showcase_stepper_create(stage, 64, t);
     s_focus_components[2] = showcase_progress_create(
-        stage, 124, "Ambient level", s_device_volume, t);
+        stage, 120, "Ambient level", s_device_volume, t);
     focus_bind(lens, 3, 0);
 }
 
@@ -1400,7 +1422,9 @@ static void navigation_refresh_tabs(uint8_t selected)
 {
     const ui_glass_theme_t *t = theme();
     for (uint8_t i = 0; i < 3; ++i) {
-        uint32_t color = i == selected ? t->text : t->text_muted;
+        // 选中项压在浅 accent pill 上：用深色 content_surface，近白 text
+        // 在四套主题下对比度都只有约 2.1–2.7:1。
+        uint32_t color = i == selected ? t->content_surface : t->text_muted;
         set_label_color(s_navigation.tab_items[i], color);
     }
 }
@@ -2317,10 +2341,12 @@ static void focused_action(void)
                                          UI_GLASS_MOTION_FOCUS));
         } else if (s_focus.index == 2) {
             s_selection_check = !s_selection_check;
-            rebuild_page();
+            showcase_choice_set(&s_focus_components[2], s_selection_check,
+                                theme());
         } else {
             s_selection_radio = !s_selection_radio;
-            rebuild_page();
+            showcase_choice_set(&s_focus_components[3], s_selection_radio,
+                                theme());
         }
         break;
     case SHOWCASE_ADJUSTMENTS:
