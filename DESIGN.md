@@ -80,7 +80,7 @@ three-card study without making that layout a framework default.
 | Focus | 320 ms | continuous movement of one shared focus lens |
 | Materialize | 520 ms | material and content becoming available |
 | Morph | 560 ms | trigger becoming menu, popover, or sheet |
-| Page | 640 ms | whole-scene continuity at the panel's visible cadence |
+| Page | 400 ms | whole-scene continuity at the panel's visible cadence |
 
 `ui_glass_motion.*` provides integer cubic easing, a deterministic spring with
 one restrained overshoot, and reusable morph geometry. Reduced Motion keeps an

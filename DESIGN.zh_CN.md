@@ -73,7 +73,7 @@ Material Engine 使用适合 RGB565 的预计算透明度、边缘、镜面高�
 | Focus | 320 ms | 单一 Focus Lens 的连续移动 |
 | Materialize | 520 ms | 材质和内容逐步可用 |
 | Morph | 560 ms | Trigger 原位成为 Menu、Popover 或 Sheet |
-| Page | 640 ms | 适配面板可见刷新节奏的整场景连续切换 |
+| Page | 400 ms | 适配面板可见刷新节奏的整场景连续切换 |
 
 `ui_glass_motion.*` 提供整数 Cubic Easing、只有一次克制 Overshoot 的确定性 Spring，
 以及通用 Morph Geometry。Reduced Motion 保留 80 ms Press，空间位移动效改为立即完成。

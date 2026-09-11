@@ -134,6 +134,7 @@ typedef struct {
     bool animating;
     uint8_t item;
     uint8_t visual_depth;
+    uint8_t last_depth;
 } morph_view_t;
 
 typedef struct {
@@ -807,6 +808,9 @@ static ui_glass_component_t showcase_segmented_create(
     lv_obj_t *platter = ui_glass_surface_create(
         component.root, 6, 2, 184, 38, UI_GLASS_RADIUS_CONTROL, t->control_tint,
         t->control_opacity, t->control_material);
+    // 底板不画三层光学边：它与 indicator 同心同半径、只内缩 3px，两组边会贴成
+    // "两重边框"。底板留半透明填充作凹槽，光学边只由选中的 indicator 承担。
+    ui_glass_surface_set_edge_strength(platter, 0);
     component.auxiliary = platter;
     component.indicator = ui_glass_surface_create(
         platter, UI_GLASS_OPTIC_RING_COUNT + s_segment_index * 59,
@@ -833,9 +837,6 @@ static void segment_motion_set(void *value, int32_t progress)
     lv_obj_set_x(motion->indicator,
                  ui_glass_interpolate(motion->start_x,
                                       motion->target_x, eased));
-    ui_glass_surface_set_glint(
-        motion->indicator,
-        -256 + progress * 1536 / UI_GLASS_MOTION_PROGRESS_MAX);
 }
 
 static void segment_motion_finish(segment_motion_t *motion)
@@ -1139,8 +1140,25 @@ static void morph_set(void *value, int32_t progress)
                            : UI_GLASS_MOTION_PROGRESS_MAX - visual_eased;
     morph->visual_depth = (uint8_t)(openness * 4 /
                                     UI_GLASS_MOTION_PROGRESS_MAX);
-    reference_glass_apply(morph->surface, morph->base_tint,
-                          frame.opacity, morph->visual_depth);
+    /* Optics are suppressed during the morph, so edge_strength writes and
+       invalidate_perimeter() are pure waste — skip them entirely.  The tint
+       colour depends only on depth (0..4, changes ~4 times per animation);
+       when depth is stable we skip the three mix_rgb calls and the
+       bg_color style write, updating only bg_opa which is the sole value
+       that changes every frame.  morph_finish restores the full state. */
+    if (morph->visual_depth != morph->last_depth) {
+        uint8_t d = morph->visual_depth;
+        uint32_t top = ui_glass_mix_rgb(morph->base_tint, 0xE9F8FF,
+                                        (uint8_t)(28 + d * 5));
+        uint32_t bottom = ui_glass_mix_rgb(morph->base_tint, 0x03101C,
+                                           (uint8_t)(34 + d * 4));
+        uint32_t fill = ui_glass_mix_rgb(top, bottom, 116);
+        lv_obj_set_style_bg_color(morph->surface, lv_color_hex(fill), 0);
+        morph->last_depth = d;
+    }
+    lv_obj_set_style_bg_opa(morph->surface,
+                            opacity_clamp(frame.opacity +
+                                          morph->visual_depth * 2), 0);
     if (morph->shadow) {
         // 阴影留在半透明 surface 覆盖范围内，只透出纵深，不再把等大圆角轮廓
         // 向下探出菜单外缘；否则展开态会被读成 Quick Actions 的第二重边。
@@ -1157,11 +1175,8 @@ static void morph_set(void *value, int32_t progress)
             (lv_opa_t)(24 + openness * 28 /
                        UI_GLASS_MOTION_PROGRESS_MAX), 0);
     }
-    ui_glass_surface_set_glint(
-        morph->surface,
-        morph->target_open
-            ? -256 + progress * 1536 / UI_GLASS_MOTION_PROGRESS_MAX
-            : 1280 - progress * 1536 / UI_GLASS_MOTION_PROGRESS_MAX);
+    // 快捷菜单展开/收起不跑扫光：从左到右的 glint 高光在这块 192x190 玻璃面上
+    // 既显眼又昂贵，用户不需要。glint 始终隐藏，morph_toggle 期间另抑制光学边。
 
     uint8_t menu_opacity = morph->target_open
                                ? opacity_from_range(progress, 330, 760)
@@ -1196,8 +1211,13 @@ static void morph_finish(morph_view_t *morph)
     morph->animating = false;
     morph_set(morph, UI_GLASS_MOTION_PROGRESS_MAX);
     if (morph->surface) {
+        reference_glass_apply(morph->surface, morph->base_tint,
+                              morph->to.opacity, morph->visual_depth);
         ui_glass_surface_set_glint(morph->surface, UI_GLASS_GLINT_HIDDEN);
     }
+    // 恢复动画期间被抑制的光学边，并整屏失效重绘一次干净的静止态。
+    ui_glass_set_optics_suppressed(false);
+    if (s_runtime.screen) lv_obj_invalidate(s_runtime.screen);
 }
 
 static void morph_completed(lv_anim_t *animation)
@@ -1208,9 +1228,12 @@ static void morph_completed(lv_anim_t *animation)
 static void morph_toggle(void)
 {
     if (!s_morph.surface || s_morph.animating) return;
+    // 折叠态 36x36 + RADIUS_PANEL(18)：18 恰为边长一半，LVGL 钳制后静止即
+    // 正圆；插值 18↔22(FLOATING) 全程数值，LV_RADIUS_CIRCLE 不进 morph 路径。
+    // 收进信息卡内右上角 y=18（绝对 y[62,98)），曲名下移后与按钮底留 6px。
     ui_glass_morph_frame_t collapsed = {
-        .x = 178, .y = 14, .width = 40, .height = 40,
-        .radius = UI_GLASS_RADIUS_CONTROL, .opacity = 148,
+        .x = 178, .y = 18, .width = 36, .height = 36,
+        .radius = UI_GLASS_RADIUS_PANEL, .opacity = 148,
     };
     ui_glass_morph_frame_t expanded = {
         .x = 26, .y = 12, .width = 192, .height = 190,
@@ -1220,6 +1243,7 @@ static void morph_toggle(void)
     s_morph.from = s_morph.open ? expanded : collapsed;
     s_morph.to = s_morph.open ? collapsed : expanded;
     s_morph.animating = true;
+    s_morph.last_depth = 0xFF;
 
     uint16_t duration = ui_glass_motion_duration(
         s_runtime.mode, UI_GLASS_MOTION_MORPH);
@@ -1227,6 +1251,9 @@ static void morph_toggle(void)
         morph_finish(&s_morph);
         return;
     }
+    // 展开态是 192x190 大玻璃面，逐帧重绘三层光学边是卡顿主因。动画期间抑制
+    // 光学边（同页面转场手法），morph_finish 结束时恢复并整屏重绘。
+    ui_glass_set_optics_suppressed(true);
     lv_anim_t animation;
     lv_anim_init(&animation);
     lv_anim_set_var(&animation, &s_morph);
@@ -1244,21 +1271,23 @@ static void build_overlays(lv_obj_t *root)
     lv_obj_t *scene = lv_obj_get_parent(root);
     lv_obj_t *content = content_layer_create(root, 14, 6, 212, 252, t);
     s_morph.context = content;
-    solid_object(content, 0, 8, 212, 76, UI_GLASS_RADIUS_PANEL,
+    // 信息卡加高到 92 收纳右上角圆形快捷按钮；曲名下移到按钮下方避开遮挡。
+    solid_object(content, 0, 8, 212, 92, UI_GLASS_RADIUS_PANEL,
                  0x00101C, LV_OPA_30);
-    text_at(content, "Now Playing", 16, 16,
+    text_at(content, "Now Playing", 16, 14,
             &lv_font_montserrat_14, t->text_muted);
-    text_at(content, "Midnight Current", 16, 40,
+    text_at(content, "Midnight Current", 16, 54,
             &lv_font_montserrat_20, t->text);
     s_player_state_label = text_at(
         content, s_player_playing ? "Playing  |  24 min"
                                   : "Paused  |  24 min",
-        16, 66, &lv_font_montserrat_14, t->text_muted);
+        16, 78, &lv_font_montserrat_14, t->text_muted);
 
-    lv_obj_t *art = solid_object(content, 0, 94, 212, 96,
+    // 波形卡减高到 84 并下移，把匀出的高度让给上方信息卡。
+    lv_obj_t *art = solid_object(content, 0, 108, 212, 84,
                                  UI_GLASS_RADIUS_PANEL,
                                  0x0E4669, LV_OPA_COVER);
-    lv_obj_t *orb = solid_object(art, 15, 14, 68, 68, LV_RADIUS_CIRCLE,
+    lv_obj_t *orb = solid_object(art, 15, 8, 68, 68, LV_RADIUS_CIRCLE,
                                  t->accent, 88);
     lv_obj_t *audio = ui_glass_label(
         orb, LV_SYMBOL_AUDIO, &lv_font_montserrat_20, t->text);
@@ -1266,7 +1295,7 @@ static void build_overlays(lv_obj_t *root)
     static const uint8_t bar_heights[] = { 22, 48, 60, 34 };
     for (uint8_t i = 0; i < sizeof(bar_heights); ++i) {
         int height = bar_heights[i];
-        solid_object(art, 108 + i * 14, 48 - height / 2,
+        solid_object(art, 108 + i * 14, 42 - height / 2,
                      5, height, LV_RADIUS_CIRCLE,
                      t->text, i == 2 ? 230 : 126);
     }
@@ -1280,10 +1309,10 @@ static void build_overlays(lv_obj_t *root)
     lv_obj_t *overlay = plain_object(
         scene, 0, SHOWCASE_SCENE_Y,
         LIQUID_GLASS_COMPOSITOR_WIDTH, SHOWCASE_SCENE_HEIGHT);
-    s_morph.shadow = solid_object(overlay, 180, 16, 36, 36,
-                                  UI_GLASS_RADIUS_CONTROL, 0x01070D, 24);
+    s_morph.shadow = solid_object(overlay, 180, 20, 32, 32,
+                                  UI_GLASS_RADIUS_PANEL, 0x01070D, 24);
     s_morph.surface = reference_glass_create(
-        overlay, 178, 14, 40, 40, UI_GLASS_RADIUS_CONTROL,
+        overlay, 178, 18, 36, 36, UI_GLASS_RADIUS_PANEL,
         148, 0, t, &s_morph.base_tint);
     s_morph.button_label = ui_glass_label(
         s_morph.surface, LV_SYMBOL_LIST, &lv_font_montserrat_14, t->text);

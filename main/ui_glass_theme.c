@@ -82,7 +82,7 @@ uint16_t ui_glass_motion_duration(ui_glass_mode_t mode,
         [UI_GLASS_MOTION_PRESS] = 120,
         [UI_GLASS_MOTION_FOCUS] = 320,
         [UI_GLASS_MOTION_MORPH] = 560,
-        [UI_GLASS_MOTION_PAGE] = 640,
+        [UI_GLASS_MOTION_PAGE] = 400,
         [UI_GLASS_MOTION_MATERIALIZE] = 520,
     };
     if (token < UI_GLASS_MOTION_PRESS || token >= UI_GLASS_MOTION_COUNT) {
