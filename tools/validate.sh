@@ -52,6 +52,10 @@ run_static_checks() {
         tests/test_usage_model.c main/usage_model.c \
         -o "${test_dir}/test_usage_model"
     "${test_dir}/test_usage_model"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_ui_dashboard_cards.c main/ui_dashboard_cards.c \
+        -o "${test_dir}/test_ui_dashboard_cards"
+    "${test_dir}/test_ui_dashboard_cards"
     # The committed digit font must match what the generator produces from the
     # checked-in TTF and SYMBOLS; a stale copy would silently draw empty boxes
     # for any glyph added to SYMBOLS but not regenerated.

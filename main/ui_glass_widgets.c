@@ -2,6 +2,8 @@
 
 #include "ui_glass.h"
 
+#include <string.h>
+
 static lv_obj_t *plain_object(lv_obj_t *parent, int x, int y,
                               int width, int height)
 {
@@ -123,12 +125,22 @@ ui_glass_component_t ui_glass_row_create(lv_obj_t *parent,
     component.root = plain_object(parent, x, y, width, height);
     component.label = label_create(component.root, label,
                                    &lv_font_montserrat_14, theme->text);
+    int value_width = value ? (strlen(value) <= 2 ? 24 : 60) : 0;
+    lv_obj_set_width(component.label,
+                     width - UI_GLASS_SPACE_MD * 2 -
+                     (value ? value_width + 8 : 0));
+    lv_label_set_long_mode(component.label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(component.label, lv_font_montserrat_14.line_height);
     lv_obj_align(component.label, LV_ALIGN_LEFT_MID,
                  UI_GLASS_SPACE_MD, -1);
     if (value) {
         component.value = label_create(component.root, value,
                                        &lv_font_montserrat_14,
                                        theme->text_muted);
+        lv_obj_set_width(component.value, value_width);
+        lv_label_set_long_mode(component.value, LV_LABEL_LONG_DOT);
+        lv_obj_set_height(component.value, lv_font_montserrat_14.line_height);
+        lv_obj_set_style_text_align(component.value, LV_TEXT_ALIGN_RIGHT, 0);
         lv_obj_align(component.value, LV_ALIGN_RIGHT_MID,
                      -UI_GLASS_SPACE_MD, -1);
     }
@@ -142,6 +154,7 @@ ui_glass_component_t ui_glass_toggle_create(
     if (!theme) theme = ui_glass_theme_get(UI_GLASS_MODE_STANDARD);
     ui_glass_component_t component = ui_glass_row_create(
         parent, x, y, width, height, label, NULL, theme);
+    lv_obj_set_width(component.label, width - UI_GLASS_SPACE_MD - 62);
     component.indicator = plain_object(component.root, width - 54, 9, 42, 24);
     lv_obj_set_style_radius(component.indicator, LV_RADIUS_CIRCLE, 0);
     component.auxiliary = ui_glass_surface_create(
@@ -162,6 +175,14 @@ ui_glass_component_t ui_glass_slider_create(
     component.label = label_create(component.root, label,
                                    &lv_font_montserrat_14, theme->text);
     lv_obj_set_pos(component.label, UI_GLASS_SPACE_MD, 3);
+    lv_obj_set_width(component.label, width - UI_GLASS_SPACE_MD * 2 - 50);
+    lv_label_set_long_mode(component.label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(component.label, lv_font_montserrat_14.line_height);
+    component.value = label_create(component.root, "",
+                                    &lv_font_montserrat_14, theme->text_muted);
+    lv_obj_set_width(component.value, 44);
+    lv_obj_set_style_text_align(component.value, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_align(component.value, LV_ALIGN_TOP_RIGHT, -UI_GLASS_SPACE_MD, 3);
     // A long label and a horizontal track do not share one readable baseline
     // on the 196 px content width. Use the same two-line hierarchy as Progress:
     // label first, full-width track below, with a deliberate vertical gap.
@@ -257,6 +278,9 @@ void ui_glass_slider_set(ui_glass_component_t *component, uint8_t percent,
         return;
     }
     if (percent > 100) percent = 100;
+    if (component->value) {
+        lv_label_set_text_fmt(component->value, "%u%%", percent);
+    }
     int track_width = lv_obj_get_width(component->indicator);
     int x = (track_width - 14) * percent / 100;
     lv_obj_set_x(component->auxiliary, x);
@@ -295,6 +319,9 @@ void ui_glass_slider_set_animated(ui_glass_component_t *component,
         return;
     }
     if (percent > 100) percent = 100;
+    if (component->value) {
+        lv_label_set_text_fmt(component->value, "%u%%", percent);
+    }
     int track_width = lv_obj_get_width(component->indicator);
     int target_x = (track_width - 14) * percent / 100;
     lv_obj_set_style_bg_color(component->auxiliary,

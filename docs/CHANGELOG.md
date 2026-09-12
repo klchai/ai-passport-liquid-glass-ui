@@ -6,6 +6,17 @@
 
 ## Unreleased
 
+- Polished all ten dashboard pages without replacing the glass layout. Mode
+  entry/exit hints explain long OK without crowding long page titles. Controls
+  show brightness percentages and audio availability; Activity uses consistent
+  demo states. Player, Home, Devices, and Moments identify sample content and
+  keep action feedback separate from connection state. Focus dims its backdrop
+  and uses a checkbox for Auto resume. Accessibility opacity now covers Player,
+  Home, and the data pages. Kaboo labels token units, truncates long model names,
+  supports previous/next cards, and pauses rotation during scene control.
+  Claude labels used quota, and both data pages expose sample age and mute old
+  values. Battery readings refresh in the application task once per minute.
+
 - Fixed three showcase layout defects seen on hardware. Player's title and
   album cards now share the 212 px content width; the Quick Actions trigger
   sits 8 px inside the title card instead of 6 px past its edge; the expanded

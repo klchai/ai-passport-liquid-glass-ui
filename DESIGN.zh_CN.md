@@ -8,7 +8,7 @@
 
 本文定义硬件原生 Glass System 的长期视觉与交互边界。当前 Foundation 已实现
 Tokens、四种无障碍 Profile、确定性 Motion、三键 Focus、核心内容与控制组件、动态
-显示质量、八场景 Showcase，以及独立保留的旧 Motion Lab。组件真机成本在当前固件
+显示质量、八个展示场景与两个实时用量页面。组件真机成本在当前固件
 刷入并完成物理测量前保持待测状态。
 
 ## 方向契约
@@ -80,12 +80,14 @@ Material Engine 使用适合 RGB565 的预计算透明度、边缘、镜面高�
 
 ## 输入与焦点
 
-- 短按 UP 前进到下一张 Showcase 页面，双击 UP 返回上一页。
-- DOWN 执行当前场景的次操作，通常用于推进统一 Focus Model。
-- OK 激活当前 Focus 控件，或执行场景主操作。
-- 长按 OK 继续作为仓库统一的返回菜单操作。
-- 自动巡航从首个 Player 场景开始，展示每页的主要动效与状态反馈，并在第一次
-  实体输入后停止。
+- 浏览模式：UP/DOWN 切换上一页/下一页，OK 执行页面主操作。
+- 长按 OK 进入或退出页内操作，Claude 保持只读。
+- 页内操作：UP/DOWN 移动焦点或调整值，OK 激活选项。Controls 使用 OK 切换下一行，
+  Kaboo 使用 UP/DOWN 前后翻卡。
+- 进入页面或切换模式时，底栏短暂说明长按 OK 的作用。页眉保留完整页名，
+  页内模式使用强调色标题。
+- 默认关闭自动翻页与场景演示。Kaboo 每八秒轮播一次，页内操作时暂停，
+  手动翻卡后延后恢复轮播。
 
 Focus 是沿连续轨迹移动的对象，不是每个 Row 各自凭空出现和消失的边框。关闭动画后，
 聚焦状态仍必须可见。
@@ -118,14 +120,14 @@ Slider。Morph Menu、Dock 和 Device Status 已在 Showcase 中验证，但在�
 8. Appearance：可选择 Standard、High Contrast、Reduced Transparency 与 Reduced
    Motion 系统 Profile
 
-UP 是固定翻页键，DOWN 与 OK 始终留给当前场景，因此每页都能展示两种有意义的交互，
-又不需要反复学习页面导航。快速操作 Focus、Toggle、Slider 和 Segmented 时，从视觉
-对象当前采样位置重新定向，不启动互相竞争的动画。无人循环会覆盖 Player
-Menu 变形与选项移动、全部 Dock 目的地、Segmented/Toggle/Focus、三种调节器、
-多行 List、Activity 全部状态、Moments 全部操作，以及下一个 Appearance Profile 的应用。
+Kaboo 与 Claude 位于 Appearance 之后，分别为第九、第十页。Kaboo 标明 token
+计数与模型，Claude 明确百分比是已用配额。两页均显示采样新鲜度并弱化旧值。
+示例内容与操作明确标记为演示。Controls 显示真实亮度与音量，以及音频不可用状态，
+电量采样每分钟更新一次。
 
-旧三卡 Deck 保留为 Motion Lab，用于展示连续纵深交换和合成器优化，但不再作为默认
-产品 Pattern。
+快速操作 Focus、Toggle、Slider 和 Segmented 时，从视觉对象当前采样位置重新
+定向，不启动互相竞争的动画。High Contrast 与 Reduced Transparency 除了应用于
+共享控件，也覆盖内容画布、Player、Home 与实时数据页面。
 
 ## Runtime 与性能
 

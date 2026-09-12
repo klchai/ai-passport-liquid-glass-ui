@@ -4,7 +4,8 @@
 
 # ESP32-C3 上的 Liquid Glass UI
 
-这是一套面向 AI Passport 硬件的八场景交互与动效作品集：240×320 屏幕、三个实体
+这是一套面向 AI Passport 硬件的十页应用，包含八个交互场景和两个实时用量看板：
+240×320 屏幕、三个实体
 按键、8 MB Flash，并且没有 PSRAM。
 
 ![ESP32-C3 Liquid Glass UI](design/promo/liquid-glass-showcase-poster-v1-preview.jpg)
@@ -20,15 +21,21 @@
 | Devices | Activity | Moments | Appearance |
 | <img src="design/screenshots/05-devices.png" width="180" alt="Devices 场景"> | <img src="design/screenshots/06-activity.png" width="180" alt="Activity 场景"> | <img src="design/screenshots/07-moments.png" width="180" alt="Moments 场景"> | <img src="design/screenshots/08-appearance.png" width="180" alt="Appearance 场景"> |
 
-无人演示时，每页停留七秒，页内标志交互每秒推进一次；第一次实体按键输入会立即
-停止自动演示并把控制权交给用户。
+上图为最初八场景版本的截图。当前应用从 Player 启动，后续依次为 Home、Focus、
+Controls、Devices、Activity、Moments、Appearance、Kaboo 和 Claude。
+默认关闭自动翻页与页内演示。
 
-| 按键 | 操作 |
-| --- | --- |
-| UP | 下一页 |
-| DOWN | 移动焦点或选区 |
-| OK | 执行当前焦点动作 |
-| 长按 OK | 返回硬件诊断菜单 |
+| 按键 | 浏览模式 | 页内操作 |
+| --- | --- | --- |
+| UP / DOWN | 上一页 / 下一页 | 移动焦点或调整当前值 |
+| OK | 执行页面主操作 | 激活选项；Controls 切换到下一行 |
+| 长按 OK | 进入页内操作 | 返回浏览模式 |
+
+进入页面或切换模式时，底栏短暂提示长按 OK 的作用。Claude 没有页内操作。
+Kaboo 支持前后翻卡，在页内操作时暂停每八秒一次的轮播。其卡片显示 token 用量与
+费用，Claude 显示已用配额与重置时间，两页均显示采样新鲜度。展示动作与示例设备
+状态标记为 Demo，不会实际分享内容、连接设备或让开发板休眠。Controls 调节真实
+亮度与音量，电量每分钟刷新一次。
 
 ## 主要能力
 

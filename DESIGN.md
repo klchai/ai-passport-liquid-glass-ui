@@ -9,8 +9,7 @@
 This document defines the durable visual and interaction boundary of the
 hardware-native Glass System. The current foundation implements tokens, four
 accessibility profiles, deterministic motion, three-button focus, core content
-and control components, adaptive display quality, an eight-scene showcase, and a
-separate legacy Motion Lab. Device cost fields remain pending until the current
+and control components, adaptive display quality, eight showcase scenes, and two live usage pages. Device cost fields remain pending until the current
 build is flashed and measured on the physical board.
 
 ## Direction contract
@@ -88,14 +87,15 @@ one restrained overshoot, and reusable morph geometry. Reduced Motion keeps an
 
 ## Input and focus
 
-- A short UP press advances to the next showcase page; double UP returns to the
-  previous page.
-- DOWN performs the current scene's secondary action, normally advancing the
-  shared Focus Model.
-- OK activates the focused control or performs the scene's primary action.
-- Long OK remains the repository-wide return-to-menu action.
-- Auto tour starts on the initial Player scene, demonstrates every scene's
-  primary motion and state feedback, and stops on the first physical input.
+- Browse mode: UP/DOWN select the previous/next page; OK performs its primary action.
+- Long OK enters or exits scene controls; Claude remains read-only.
+- Scene controls: UP/DOWN move focus or change values; OK activates the selection.
+  Controls uses OK for the next row. Kaboo uses UP/DOWN for previous/next cards.
+- The footer briefly explains long OK at page entry and mode changes. Page names
+  remain intact in the header, and scene mode uses the accent title color.
+- Page tours and automatic scene demonstrations are disabled by default. Kaboo
+  rotates every eight seconds, pauses during scene controls, and delays rotation
+  after a manual card change.
 
 Focus is an object with a continuous trajectory, not a per-row border that
 appears and disappears. The focused state remains visible even when motion is
@@ -136,18 +136,16 @@ different from the stable internal component identifiers:
 8. Appearance: Standard, High Contrast, Reduced Transparency, and Reduced Motion
    as selectable system profiles
 
-UP is the invariant page key. DOWN and OK remain available to the current scene,
-so the device demonstrates two meaningful interactions without changing the
-navigation grammar on every page. Rapid focus, toggle, slider, and segmented
-input retargets the existing visual object from its sampled position rather than
-starting competing animations. The unattended loop covers Player menu morph and
-selection, all Dock destinations, segmented/toggle/focus motion, all three
-adjustment types, multiple list rows, all Activity states, all Moments actions,
-and application of the next Appearance profile.
+Kaboo and Claude follow Appearance as the ninth and tenth pages. Kaboo labels
+its token count and model; Claude labels percentages as used quota. Both show
+source age and visually distinguish stale values. Sample content and actions
+are identified as demonstrations. Controls shows real brightness and volume,
+including unavailable audio, while battery samples arrive once per minute.
 
-The old three-card deck remains available as Motion Lab. It demonstrates
-continuous depth exchange and compositor optimization, but it is not the
-default product pattern.
+Rapid focus, toggle, slider, and segmented input retargets the existing visual
+object from its sampled position rather than starting competing animations.
+High Contrast and Reduced Transparency apply to content canvases and to the
+Player, Home, and live-data surfaces as well as shared controls.
 
 ## Runtime and performance
 

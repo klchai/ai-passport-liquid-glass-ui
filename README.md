@@ -4,7 +4,8 @@
 
 # Liquid Glass UI on ESP32-C3
 
-An eight-scene interaction and motion showcase built for the AI Passport
+A ten-page app combining eight interaction scenes and two live usage dashboards
+built for the AI Passport
 hardware: a 240×320 display, three physical buttons, 8 MB Flash, and no PSRAM.
 
 ![Liquid Glass UI on ESP32-C3](design/promo/liquid-glass-showcase-poster-v1-preview.jpg)
@@ -22,16 +23,23 @@ experiment and is not affiliated with Apple.
 | Devices | Activity | Moments | Appearance |
 | <img src="design/screenshots/05-devices.png" width="180" alt="Devices scene"> | <img src="design/screenshots/06-activity.png" width="180" alt="Activity scene"> | <img src="design/screenshots/07-moments.png" width="180" alt="Moments scene"> | <img src="design/screenshots/08-appearance.png" width="180" alt="Appearance scene"> |
 
-The unattended reel holds each page for seven seconds and advances its
-signature interaction once per second. The first physical input immediately
-hands control to the user.
+The images above show the original eight-scene release. The current app starts
+on Player, followed by Home, Focus, Controls, Devices, Activity, Moments,
+Appearance, Kaboo, and Claude. Automatic page tours and scene demos are disabled.
 
-| Button | Action |
-| --- | --- |
-| UP | Next page |
-| DOWN | Move focus or selection |
-| OK | Run the focused action |
-| Long OK | Return to the hardware diagnostic menu |
+| Button | Browse mode | Scene controls |
+| --- | --- | --- |
+| UP / DOWN | Previous / next page | Move focus or change the current value |
+| OK | Run the page action | Activate selection; Controls selects the next row |
+| Long OK | Enter scene controls | Return to browsing |
+
+The footer briefly explains long OK when entering a page or switching modes.
+Claude has no scene controls. Kaboo supports previous/next cards and pauses
+its eight-second rotation while scene controls are active. Its cards show token
+usage and cost; Claude shows used quota and reset time. Both expose sample age.
+Showcase actions and sample device states are labeled Demo; they do not share
+content, connect devices, or put the board to sleep. Controls adjusts real
+brightness and volume, and battery readings refresh once per minute.
 
 ## What it demonstrates
 

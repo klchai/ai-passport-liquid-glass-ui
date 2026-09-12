@@ -3,6 +3,7 @@ idf_component_register(
          "showcase_scenes.c"
          "usage_link.c"
          "usage_model.c"
+         "ui_dashboard_cards.c"
          "font_digits_44.c"
          "ui_pixel_math.c"
          "ui_glass.c"

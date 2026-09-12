@@ -20,6 +20,7 @@
 #include "ui_glass_runtime.h"
 #include "ui_glass_widgets.h"
 #include "usage_link.h"
+#include "ui_dashboard_cards.h"
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -29,6 +30,7 @@
 #include "lvgl.h"
 
 #include <inttypes.h>
+#include <stdatomic.h>
 #include <stdio.h>
 
 #include <stdbool.h>
@@ -220,7 +222,9 @@ static lv_obj_t *s_header_chrome;
 static lv_obj_t *s_header_title;
 static lv_obj_t *s_link_dot;        // BLE 链路指示：绿=已连接，灰=断开
 static lv_obj_t *s_battery_label;   // 右上角电量，规范默认要求显示
-static int s_battery_soc = -1;      // app_main 开机读一次；-1 = 不可用
+static atomic_int s_battery_soc = -1; // Worker publishes; LVGL timer renders.
+static int s_battery_drawn = -2;
+static uint32_t s_mode_hint_ms;
 static lv_obj_t *s_footer;
 static lv_obj_t *s_footer_label;
 // 按键模型分两个模式，避免同一个键在不同页面语义不同：
@@ -275,6 +279,10 @@ static uint8_t s_scene_step;
 static segment_motion_t s_segment_motion;
 static lv_obj_t *s_player_state_label;
 static bool s_player_playing = true;
+static lv_obj_t *s_player_demo_label;
+static lv_obj_t *s_moments_result_label;
+static lv_obj_t *s_devices_result_label;
+static lv_obj_t *s_selection_canvas;
 static feedback_view_t s_feedback;
 
 static ui_glass_focus_model_t s_focus;
@@ -298,6 +306,8 @@ static lv_obj_t *s_adjustment_surfaces[1];
 static uint32_t s_adjustment_tints[1];
 static uint8_t s_adjustment_opacities[1];
 static QueueHandle_t s_audio_volume_queue;
+typedef enum { AUDIO_STARTING, AUDIO_READY, AUDIO_UNAVAILABLE } audio_status_t;
+static atomic_int s_audio_status = AUDIO_STARTING;
 
 static void navigation_motion_set(void *value, int32_t progress);
 static void segment_motion_set(void *value, int32_t progress);
@@ -412,6 +422,18 @@ static void content_divider_create(lv_obj_t *parent, int y,
                  t->text_muted, LV_OPA_20);
 }
 
+// Preserve the standard material while making accessibility modes opaque.
+static lv_opa_t accessible_opacity(lv_opa_t opacity)
+{
+    if (s_runtime.mode == UI_GLASS_MODE_REDUCED_TRANSPARENCY) {
+        return LV_OPA_COVER;
+    }
+    if (s_runtime.mode == UI_GLASS_MODE_HIGH_CONTRAST && opacity < 224) {
+        return 224;
+    }
+    return opacity;
+}
+
 static void reference_glass_apply(lv_obj_t *surface, uint32_t base_tint,
                                   uint8_t opacity, uint8_t depth)
 {
@@ -423,7 +445,7 @@ static void reference_glass_apply(lv_obj_t *surface, uint32_t base_tint,
                                        (uint8_t)(34 + depth * 4));
     uint32_t fill = ui_glass_mix_rgb(top, bottom, 116);
     ui_glass_surface_set_tint(surface, fill,
-                              opacity_clamp(opacity + depth * 2));
+                              accessible_opacity(opacity_clamp(opacity + depth * 2)));
     // LVGL's software blur shadow starves the idle task on this no-PSRAM C3.
     // Depth is represented by cheap offset silhouettes owned by the scene.
     lv_obj_set_style_shadow_width(surface, 0, 0);
@@ -513,6 +535,10 @@ static void stop_scene_activity(void)
     s_focus_lens = NULL;
     s_focus_count = 0;
     s_player_state_label = NULL;
+    s_player_demo_label = NULL;
+    s_moments_result_label = NULL;
+    s_devices_result_label = NULL;
+    s_selection_canvas = NULL;
     memset(s_focus_components, 0, sizeof(s_focus_components));
 }
 
@@ -660,6 +686,7 @@ static void audio_volume_task(void *context)
     (void)context;
     esp_err_t error = bsp_audio_init();
     bool ready = error == ESP_OK;
+    atomic_store(&s_audio_status, ready ? AUDIO_READY : AUDIO_UNAVAILABLE);
     if (!ready) {
         ESP_LOGE("showcase", "音频初始化失败，Controls 音量调节不可用: %s",
                  esp_err_to_name(error));
@@ -681,11 +708,13 @@ static void audio_volume_worker_start(void)
     if (s_audio_volume_queue) return;
     s_audio_volume_queue = xQueueCreate(1, sizeof(uint8_t));
     if (!s_audio_volume_queue) {
+        atomic_store(&s_audio_status, AUDIO_UNAVAILABLE);
         ESP_LOGE("showcase", "无法创建音量调节队列");
         return;
     }
     if (xTaskCreate(audio_volume_task, "audio_volume", 4096, NULL, 3,
                     NULL) != pdPASS) {
+        atomic_store(&s_audio_status, AUDIO_UNAVAILABLE);
         ESP_LOGE("showcase", "无法创建音量调节任务");
         vQueueDelete(s_audio_volume_queue);
         s_audio_volume_queue = NULL;
@@ -698,6 +727,29 @@ static void audio_volume_set_async(uint8_t volume)
     if (s_audio_volume_queue) {
         xQueueOverwrite(s_audio_volume_queue, &volume);
     }
+}
+
+// Called only by the LVGL task (or with the LVGL lock held). The worker
+// publishes availability without retaining or touching any page objects.
+static void adjustments_audio_refresh(void)
+{
+    if (s_page != SHOWCASE_ADJUSTMENTS || !s_focus_components[2].value) return;
+    audio_status_t status = atomic_load(&s_audio_status);
+    ui_glass_component_t *volume = &s_focus_components[2];
+    char text[16];
+    if (status == AUDIO_READY) {
+        snprintf(text, sizeof(text), "%u%%", s_device_volume);
+    } else {
+        snprintf(text, sizeof(text), "%s",
+                 status == AUDIO_STARTING ? "Starting" : "Unavailable");
+    }
+    if (strcmp(lv_label_get_text(volume->value), text) == 0) return;
+    lv_label_set_text(volume->value, text);
+    lv_obj_set_style_text_color(volume->value,
+        lv_color_hex(status == AUDIO_UNAVAILABLE ? theme()->warning
+                                                : theme()->text_muted), 0);
+    lv_obj_set_style_opa(volume->indicator,
+                        status == AUDIO_READY ? LV_OPA_COVER : LV_OPA_30, 0);
 }
 
 static void adjustment_change(int8_t direction)
@@ -720,6 +772,10 @@ static void adjustment_change(int8_t direction)
                               s_stepper_value);
         adjustments_glass_refresh();
     } else if (s_focus.index == 2) {
+        if (atomic_load(&s_audio_status) != AUDIO_READY) {
+            adjustments_audio_refresh();
+            return;
+        }
         uint8_t next = adjustment_clamp_step(
             s_device_volume, direction, SHOWCASE_VOLUME_MIN,
             SHOWCASE_VOLUME_MAX, SHOWCASE_VOLUME_STEP);
@@ -979,8 +1035,15 @@ static ui_glass_component_t showcase_progress_create(
     component.root = plain_object(parent, 6, y, 196, 44);
     component.label = text_at(component.root, label, 14, 3,
                               &lv_font_montserrat_14, t->text);
-    component.value = text_at(component.root, "0%", 154, 3,
+    lv_obj_set_width(component.label, 70);
+    lv_label_set_long_mode(component.label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(component.label, lv_font_montserrat_14.line_height);
+    component.value = text_at(component.root, "0%", 90, 3,
                               &lv_font_montserrat_14, t->text_muted);
+    lv_obj_set_width(component.value, 92);
+    lv_obj_set_style_text_align(component.value, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_label_set_long_mode(component.value, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(component.value, lv_font_montserrat_14.line_height);
     lv_label_set_text_fmt(component.value, "%u%%", percent);
     lv_obj_t *track = solid_object(component.root, 14, 29, 168, 6,
                                    LV_RADIUS_CIRCLE, t->text_muted, LV_OPA_20);
@@ -1003,8 +1066,11 @@ static void build_buttons(lv_obj_t *root)
                  0x343873, LV_OPA_80);
     text_at(art, "Night Drive", 14, 12,
             &lv_font_montserrat_20, t->text);
-    text_at(art, "12 moments", 15, 42,
+    s_moments_result_label = text_at(art, "Demo | 12 moments", 15, 42,
             &lv_font_montserrat_14, t->text_muted);
+    lv_obj_set_width(s_moments_result_label, 174);
+    lv_label_set_long_mode(s_moments_result_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(s_moments_result_label, lv_font_montserrat_14.line_height);
 
     // Follow the action capsule's actual 184 px geometry with only a two-pixel
     // focus halo. The previous 196 px lens produced a visibly nested pill.
@@ -1024,7 +1090,11 @@ static void build_buttons(lv_obj_t *root)
 static void build_selection(lv_obj_t *root)
 {
     const ui_glass_theme_t *t = theme();
-    lv_obj_t *stage = showcase_content_stage_create(root, t);
+    s_selection_canvas = solid_object(
+        root, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH, 228, 0,
+        t->content_surface,
+        accessible_opacity(s_selection_check ? 160 : 64));
+    lv_obj_t *stage = content_layer_create(root, 16, 4, 208, 204, t);
     // The first row already contains a glass segmented platter. Keep the
     // shared focus halo close to that platter instead of drawing a second,
     // substantially wider capsule around it.
@@ -1046,7 +1116,7 @@ static void build_selection(lv_obj_t *root)
     s_focus_components[2] = showcase_choice_create(
         stage, 102, "Dim wallpaper", s_selection_check, false, t);
     s_focus_components[3] = showcase_choice_create(
-        stage, 150, "Auto resume", s_selection_radio, true, t);
+        stage, 150, "Auto resume", s_selection_radio, false, t);
     focus_bind(lens, 4, 0);
 }
 
@@ -1075,8 +1145,9 @@ static void build_adjustments(lv_obj_t *root)
         stage, 6, 8, 196, 44, "Brightness", s_control_slider, t);
     s_focus_components[1] = showcase_stepper_create(stage, 64, t);
     s_focus_components[2] = showcase_progress_create(
-        stage, 120, "Ambient level", s_device_volume, t);
+        stage, 120, "Volume", s_device_volume, t);
     focus_bind(lens, 3, 0);
+    adjustments_audio_refresh();
 }
 
 static void build_lists(lv_obj_t *root)
@@ -1098,7 +1169,17 @@ static void build_lists(lv_obj_t *root)
         s_focus_h[i] = 42;
         s_focus_components[i] = ui_glass_row_create(
             stage, 6, s_focus_y[i], 196, 42, labels[i], values[i], t);
+        // Keep full names and connection states on separate baselines.
+        lv_obj_set_width(s_focus_components[i].label, 172);
+        lv_label_set_long_mode(s_focus_components[i].label, LV_LABEL_LONG_DOT);
+        lv_obj_set_height(s_focus_components[i].label, lv_font_montserrat_14.line_height);
+        lv_obj_align(s_focus_components[i].label, LV_ALIGN_TOP_LEFT, 12, 2);
+        lv_obj_set_width(s_focus_components[i].value, 172);
+        lv_obj_align(s_focus_components[i].value, LV_ALIGN_TOP_LEFT, 12, 22);
+        lv_obj_set_style_text_align(s_focus_components[i].value, LV_TEXT_ALIGN_LEFT, 0);
     }
+    s_devices_result_label = text_at(root, "Demo devices | OK: select", 28, 204,
+                                     &lv_font_montserrat_14, t->text_muted);
     focus_bind(lens, 4, 0);
 }
 
@@ -1179,8 +1260,8 @@ static void morph_set(void *value, int32_t progress)
         morph->last_depth = d;
     }
     lv_obj_set_style_bg_opa(morph->surface,
-                            opacity_clamp(frame.opacity +
-                                          morph->visual_depth * 2), 0);
+                            accessible_opacity(opacity_clamp(frame.opacity +
+                                          morph->visual_depth * 2)), 0);
     if (morph->shadow) {
         // 阴影留在半透明 surface 覆盖范围内，只透出纵深，不再把等大圆角轮廓
         // 向下探出菜单外缘；否则展开态会被读成 Quick Actions 的第二重边。
@@ -1295,8 +1376,8 @@ static void build_overlays(lv_obj_t *root)
     s_morph.context = content;
     // 信息卡加高到 92 收纳右上角圆形快捷按钮；曲名下移到按钮下方避开遮挡。
     solid_object(content, 0, 8, 212, 92, UI_GLASS_RADIUS_PANEL,
-                 0x00101C, LV_OPA_30);
-    text_at(content, "Now Playing", 16, 14,
+                 0x00101C, accessible_opacity(LV_OPA_30));
+    text_at(content, "Demo Player", 16, 14,
             &lv_font_montserrat_14, t->text_muted);
     text_at(content, "Midnight Current", 16, 54,
             &lv_font_montserrat_20, t->text);
@@ -1322,8 +1403,8 @@ static void build_overlays(lv_obj_t *root)
                      t->text, i == 2 ? 230 : 126);
     }
     // 设备名与状态共用一行，避开播放器卡片和 footer。
-    text_at(content, LV_SYMBOL_BLUETOOTH " Passport | Connected", 16, 198,
-            &lv_font_montserrat_14, t->positive);
+    s_player_demo_label = text_at(content, "Demo | Passport linked", 16, 198,
+                                   &lv_font_montserrat_14, t->text_muted);
 
     s_morph.dimmer = solid_object(scene, 0, 0,
                                   240, LIQUID_GLASS_COMPOSITOR_HEIGHT,
@@ -1342,7 +1423,7 @@ static void build_overlays(lv_obj_t *root)
 
     s_morph.menu = plain_object(s_morph.surface, 0, 0, 192, 190);
     lv_obj_set_style_opa(s_morph.menu, LV_OPA_TRANSP, 0);
-    text_at(s_morph.menu, "Quick Actions", 18, 16,
+    text_at(s_morph.menu, "Demo Actions", 18, 16,
             &lv_font_montserrat_20, t->text);
     s_morph.highlight = solid_object(
         s_morph.menu, 8, 48, 176, 38, UI_GLASS_RADIUS_CONTROL,
@@ -1368,7 +1449,7 @@ static void navigation_content_update(uint8_t index)
         "Good evening", "Midnight Current", "Passport Linked",
     };
     static const char *const subtitles[] = {
-        "Everything is ready", "Ambient focus mix", "Bluetooth  |  Stable",
+        "Demo | Ready for today", "Demo | Ambient mix", "Demo | Bluetooth link",
     };
     static const char *const symbols[] = {
         LV_SYMBOL_HOME, LV_SYMBOL_PLAY, LV_SYMBOL_BLUETOOTH,
@@ -1382,7 +1463,7 @@ static void navigation_content_update(uint8_t index)
                               lv_color_hex(colors[index]), 0);
     lv_label_set_text(s_navigation.symbol, symbols[index]);
     lv_label_set_text(s_navigation.state_label,
-                      index == 0 ? "READY" : index == 1 ? "PLAYING" : "ONLINE");
+                      index == 0 ? "BATTERY" : index == 1 ? "PROGRESS" : "SIGNAL");
     lv_label_set_text(s_navigation.value_label,
                       index == 0 ? "100%" : index == 1 ? "42%" : "-48 dBm");
 }
@@ -1394,7 +1475,7 @@ static void navigation_content_create(lv_obj_t *panel,
     // 标题卡与 hero 用满 content 的 212 宽，与下方 dock / footer 左右对齐
     // （三者绝对范围都是 14..226）。缩进会让上下两组差 16px，肉眼很明显。
     solid_object(s_navigation.content, 0, 8, 212, 60,
-                 UI_GLASS_RADIUS_PANEL, 0x00101C, LV_OPA_20);
+                 UI_GLASS_RADIUS_PANEL, 0x00101C, accessible_opacity(LV_OPA_20));
     s_navigation.title = text_at(s_navigation.content, "", 16, 18,
                                  &lv_font_montserrat_20, t->text);
     s_navigation.subtitle = text_at(s_navigation.content, "", 16, 47,
@@ -1582,12 +1663,12 @@ static void feedback_refresh(bool animate)
         "Saving offline", "Sync paused", "Can't sync library",
     };
     static const char *const details[] = {
-        "Midnight Current", "Ready to resume", "Press OK to retry",
+        "Saving your mix", "Download on hold", "Try again with OK",
     };
     static const char *const toasts[] = {
-        "Available offline", "Waiting for network", "Retry ready",
+        "Saving...", "Progress saved", "OK: retry",
     };
-    static const uint8_t progress[] = { 64, 64, 38 };
+    static const uint8_t progress[] = { 64, 64, 64 };
     const ui_glass_theme_t *t = theme();
     uint8_t state = s_feedback_state % 3u;
     uint32_t color = state == 0 ? t->accent
@@ -1626,7 +1707,7 @@ static void build_feedback(lv_obj_t *root)
 {
     const ui_glass_theme_t *t = theme();
     lv_obj_t *stage = showcase_content_stage_create(root, t);
-    feedback_chip(stage, 14, 10, 82, "Online", t->positive, NULL);
+    feedback_chip(stage, 14, 10, 82, "Demo", t->text_muted, NULL);
     s_feedback.status_chip = feedback_chip(
         stage, 108, 10, 82, "", t->accent, &s_feedback.status_label);
 
@@ -1640,7 +1721,7 @@ static void build_feedback(lv_obj_t *root)
         &lv_font_montserrat_14, t->text_muted);
 
     s_feedback.progress = showcase_progress_create(
-        stage, 108, "Offline mix", 64, t);
+        stage, 108, "Saved", 64, t);
     lv_obj_t *toast = ui_glass_platter_create(stage, 26, 158, 156, 34, t);
     s_feedback.toast_label = centered_label(
         toast, "", &lv_font_montserrat_14, t->text);
@@ -1685,16 +1766,17 @@ static lv_obj_t *scene_create(void)
 static lv_obj_t *data_stage(lv_obj_t *root)
 {
     const ui_glass_theme_t *t = theme();
-    // 96 与展示场景 Standard 模式一致；再高壁纸就成了一片死灰。
+    // Keep the standard wallpaper treatment while honoring accessibility modes.
+    lv_opa_t canvas_opacity = content_canvas_opacity();
     solid_object(root, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH,
-                 SHOWCASE_SCENE_HEIGHT, 0, t->content_surface, 96);
+                 SHOWCASE_SCENE_HEIGHT, 0, t->content_surface, canvas_opacity);
     lv_obj_t *fade = solid_object(root, 0, 196, LIQUID_GLASS_COMPOSITOR_WIDTH,
                                   SHOWCASE_SCENE_HEIGHT - 196, 0,
                                   t->content_surface, LV_OPA_TRANSP);
     lv_obj_set_style_bg_grad_color(fade, lv_color_hex(t->content_surface), 0);
     lv_obj_set_style_bg_grad_dir(fade, LV_GRAD_DIR_VER, 0);
     lv_obj_set_style_bg_main_opa(fade, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_bg_grad_opa(fade, 96, 0);
+    lv_obj_set_style_bg_grad_opa(fade, canvas_opacity, 0);
     lv_obj_set_style_bg_opa(fade, LV_OPA_COVER, 0);
     return plain_object(root, 16, 4, 208, 204);
 }
@@ -1782,9 +1864,11 @@ static void build_kaboo(lv_obj_t *root)
     // 模型名做成 accent 色胶囊，像 Activity 场景的状态 chip。
     lv_obj_t *chip = solid_object(stage, 12, 172, 184, 28, LV_RADIUS_CIRCLE,
                                   t->accent, LV_OPA_20);
-    s_kaboo_view.model = text_at(chip, "--", 0, 6, &lv_font_montserrat_14,
+    s_kaboo_view.model = text_at(chip, "--", 10, 6, &lv_font_montserrat_14,
                                  t->accent);
-    lv_obj_set_width(s_kaboo_view.model, 184);
+    lv_obj_set_width(s_kaboo_view.model, 164);
+    lv_label_set_long_mode(s_kaboo_view.model, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(s_kaboo_view.model, lv_font_montserrat_14.line_height);
     lv_obj_set_style_text_align(s_kaboo_view.model, LV_TEXT_ALIGN_CENTER, 0);
 
     s_kaboo_view.note = text_at(stage, "", 12, 4, &lv_font_montserrat_14,
@@ -1822,10 +1906,10 @@ static void build_claude(lv_obj_t *root)
     const ui_glass_theme_t *t = theme();
     lv_obj_t *stage = data_stage(root);
 
-    build_quota_card(stage, 27, "5 hour",
+    build_quota_card(stage, 27, "5h Used",
                      &s_claude_view.five_value, &s_claude_view.five_bar,
                      &s_claude_view.five_reset);
-    build_quota_card(stage, 119, "7 day",
+    build_quota_card(stage, 119, "7d Used",
                      &s_claude_view.seven_value, &s_claude_view.seven_bar,
                      &s_claude_view.seven_reset);
 
@@ -1835,10 +1919,32 @@ static void build_claude(lv_obj_t *root)
     lv_obj_set_style_text_align(s_claude_view.note, LV_TEXT_ALIGN_CENTER, 0);
 }
 
+// Source age is independent of BLE receipt time: repeated packets can carry
+// an old sample. Keep this line visible even while the source is fresh.
+static bool refresh_source_note(lv_obj_t *note, uint32_t sampled_unix,
+                                 uint32_t now_unix, bool have_now)
+{
+    const ui_glass_theme_t *t = theme();
+    bool fresh = have_now && usage_model_source_fresh(
+        sampled_unix, now_unix, SOURCE_TTL_SECONDS);
+    lv_obj_set_style_text_color(note,
+        lv_color_hex(fresh ? t->text_muted : t->warning), 0);
+    if (!have_now) {
+        lv_label_set_text(note, "Update time unknown");
+    } else if (!fresh) {
+        lv_label_set_text(note, "Data may be stale");
+    } else {
+        uint32_t minutes = (now_unix - sampled_unix) / 60u;
+        if (minutes == 0) lv_label_set_text(note, "Updated <1m ago");
+        else lv_label_set_text_fmt(note, "Updated %" PRIu32 "m ago", minutes);
+    }
+    return fresh;
+}
+
 static void refresh_kaboo(const usage_snapshot_t *snap, bool have)
 {
     static const char *const LABELS[KABOO_CARD_COUNT] = {
-        "TODAY", "7 DAYS", "30 DAYS",
+        "TODAY / tokens", "7 DAYS / tokens", "30 DAYS / tokens",
     };
     const ui_glass_theme_t *t = theme();
     if (!s_kaboo_view.value) return;
@@ -1847,6 +1953,8 @@ static void refresh_kaboo(const usage_snapshot_t *snap, bool have)
     dots_select(s_kaboo_view.dots, KABOO_CARD_COUNT, s_kaboo_card, t);
 
     if (!have || !(snap->flags & USAGE_FLAG_KABOO_VALID)) {
+        lv_obj_set_style_text_color(s_kaboo_view.note,
+                                    lv_color_hex(t->warning), 0);
         lv_label_set_text(s_kaboo_view.value, "--");
         lv_label_set_text(s_kaboo_view.cost, "");
         lv_label_set_text(s_kaboo_view.model, "--");
@@ -1875,18 +1983,19 @@ static void refresh_kaboo(const usage_snapshot_t *snap, bool have)
 
     // 数据源过期时明确标注，而不是让旧数字冒充当前值。
     uint32_t now_unix = 0;
-    if (usage_model_now_unix(snap, have, esp_timer_get_time(), &now_unix) &&
-        !usage_model_source_fresh(snap->kaboo_sampled_unix, now_unix,
-                                  SOURCE_TTL_SECONDS)) {
-        lv_label_set_text(s_kaboo_view.note, "Data may be stale");
-    } else {
-        lv_label_set_text(s_kaboo_view.note, "");
-    }
+    bool have_now = usage_model_now_unix(snap, have, esp_timer_get_time(),
+                                         &now_unix);
+    bool fresh = refresh_source_note(s_kaboo_view.note,
+                                     snap->kaboo_sampled_unix, now_unix, have_now);
+    lv_obj_set_style_text_color(s_kaboo_view.value,
+        lv_color_hex(fresh ? t->text : t->text_muted), 0);
+    lv_obj_set_style_text_color(s_kaboo_view.cost,
+        lv_color_hex(fresh ? t->accent : t->text_muted), 0);
 }
 
 static void refresh_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset,
                               uint8_t pct, uint32_t resets_unix,
-                              uint32_t now_unix, bool have_now)
+                              uint32_t now_unix, bool have_now, bool source_fresh)
 {
     const ui_glass_theme_t *t = theme();
 
@@ -1897,14 +2006,19 @@ static void refresh_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset,
     uint32_t color = t->accent;
     if (pct >= 90) color = t->danger;
     else if (pct >= 70) color = t->warning;
+    bool expired = have_now && usage_model_quota_expired(resets_unix, now_unix);
+    bool current = source_fresh && !expired;
+    if (!current) color = t->text_muted;
+    lv_obj_set_style_text_color(value,
+        lv_color_hex(current ? t->text : t->text_muted), 0);
     lv_obj_set_style_bg_color(bar, lv_color_hex(color), 0);
 
     if (!have_now) {
         lv_label_set_text(reset, "");
         return;
     }
-    if (usage_model_quota_expired(resets_unix, now_unix)) {
-        lv_label_set_text(reset, "window elapsed");
+    if (expired) {
+        lv_label_set_text(reset, "Awaiting update");
         return;
     }
     char buf[40];
@@ -1917,6 +2031,7 @@ static void refresh_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset,
 // 而"这个窗口当前没有数据"是另一回事。
 static void blank_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset)
 {
+    lv_obj_set_style_text_color(value, lv_color_hex(theme()->text_muted), 0);
     lv_label_set_text(value, "--");
     lv_obj_set_width(bar, 0);
     lv_label_set_text(reset, "not active");
@@ -1927,6 +2042,8 @@ static void refresh_claude(const usage_snapshot_t *snap, bool have)
     if (!s_claude_view.five_value) return;
 
     if (!have || !(snap->flags & USAGE_FLAG_CLAUDE_VALID)) {
+        lv_obj_set_style_text_color(s_claude_view.note,
+                                    lv_color_hex(theme()->warning), 0);
         blank_quota_row(s_claude_view.five_value, s_claude_view.five_bar,
                         s_claude_view.five_reset);
         blank_quota_row(s_claude_view.seven_value, s_claude_view.seven_bar,
@@ -1941,12 +2058,14 @@ static void refresh_claude(const usage_snapshot_t *snap, bool have)
     uint32_t now_unix = 0;
     bool have_now = usage_model_now_unix(snap, have, esp_timer_get_time(),
                                          &now_unix);
+    bool fresh = refresh_source_note(s_claude_view.note,
+                                     snap->claude_sampled_unix, now_unix, have_now);
     // 两个窗口各自判断：Claude Code 只在窗口活跃时才报它，缺失的那个显示
     // "not active" 而不是伪造 0%。
     if (snap->flags & USAGE_FLAG_FIVE_HOUR) {
         refresh_quota_row(s_claude_view.five_value, s_claude_view.five_bar,
                           s_claude_view.five_reset, snap->five_hour_pct,
-                          snap->five_hour_resets_unix, now_unix, have_now);
+                          snap->five_hour_resets_unix, now_unix, have_now, fresh);
     } else {
         blank_quota_row(s_claude_view.five_value, s_claude_view.five_bar,
                         s_claude_view.five_reset);
@@ -1954,18 +2073,12 @@ static void refresh_claude(const usage_snapshot_t *snap, bool have)
     if (snap->flags & USAGE_FLAG_SEVEN_DAY) {
         refresh_quota_row(s_claude_view.seven_value, s_claude_view.seven_bar,
                           s_claude_view.seven_reset, snap->seven_day_pct,
-                          snap->seven_day_resets_unix, now_unix, have_now);
+                          snap->seven_day_resets_unix, now_unix, have_now, fresh);
     } else {
         blank_quota_row(s_claude_view.seven_value, s_claude_view.seven_bar,
                         s_claude_view.seven_reset);
     }
 
-    if (have_now && !usage_model_source_fresh(snap->claude_sampled_unix,
-                                              now_unix, SOURCE_TTL_SECONDS)) {
-        lv_label_set_text(s_claude_view.note, "Data may be stale");
-    } else {
-        lv_label_set_text(s_claude_view.note, "");
-    }
 }
 
 // 从 BLE 快照刷新当前数据页。展示场景不取快照——零 BLE 开销，且它们的
@@ -2008,7 +2121,7 @@ static void refresh_data_page(void)
 
 static void kaboo_card_advance(void)
 {
-    s_kaboo_card = (uint8_t)((s_kaboo_card + 1u) % KABOO_CARD_COUNT);
+    s_kaboo_card = ui_dashboard_card_next(s_kaboo_card, KABOO_CARD_COUNT, 1);
     s_card_elapsed_ms = 0;
     refresh_data_page();
 }
@@ -2041,28 +2154,23 @@ static void shell_refresh(void)
 {
     const ui_glass_theme_t *t = theme();
     uint8_t position = page_position(s_page);
-    // 标题只放页名。"N/10" 计数会把 "Appearance" 顶到 x=190，撞上右上角
-    // 168 起的电量位；位置信息由导航条的邻居页名承担。
-    // 页内模式必须在 chrome 上可见，否则同一个键行为变了却没有任何提示。
-    if (s_scene_mode) {
-        lv_label_set_text_fmt(s_header_title, "%s " LV_SYMBOL_EDIT,
-                              PAGE_TITLES[s_page]);
-    } else {
-        lv_label_set_text(s_header_title, PAGE_TITLES[s_page]);
-    }
-    set_label_color(s_header_title, t->text);
-    // 导航条两侧都标出邻居页名：长按 OK / 双击 UP 去左边，UP 去右边。只写一侧会
-    // 让人以为翻页是单向的。中间 3 个空格是余量：最宽的相邻对（Moments 页的
-    // "Activity / Appearance"）在此格式下 187px，留 25px 给 212px 的平台。
-    // 导航条：浏览模式标出左右邻居页名（UP/DOWN 去哪）；页内模式改为提示
-    // 方向键在页内做什么、以及怎么退出，因为此时 UP/DOWN 不再翻页。
+    // Keep the entire title slot for the page name; mode lives in the footer.
+    lv_label_set_text(s_header_title, PAGE_TITLES[s_page]);
+    set_label_color(s_header_title, s_scene_mode ? t->accent : t->text);
     uint8_t left = (uint8_t)((position + SHOWCASE_PAGE_COUNT - 1u) %
                              SHOWCASE_PAGE_COUNT);
     uint8_t right = (uint8_t)((position + 1u) % SHOWCASE_PAGE_COUNT);
-    if (s_scene_mode) {
+    if (s_mode_hint_ms && page_has_scene_interaction(s_page)) {
+        lv_label_set_text(s_footer_label,
+                          s_scene_mode ? "Hold OK: exit controls"
+                                       : "Hold OK: enter controls");
+    } else if (s_scene_mode) {
         if (s_page == SHOWCASE_ADJUSTMENTS) {
             lv_label_set_text(s_footer_label,
                               LV_SYMBOL_UP LV_SYMBOL_DOWN " adjust   OK next");
+        } else if (s_page == PAGE_KABOO) {
+            lv_label_set_text(s_footer_label,
+                              LV_SYMBOL_UP LV_SYMBOL_DOWN " cards   OK next");
         } else {
             lv_label_set_text(s_footer_label,
                               LV_SYMBOL_UP LV_SYMBOL_DOWN "  move    OK  use");
@@ -2076,7 +2184,9 @@ static void shell_refresh(void)
     ui_glass_surface_set_tint(s_footer, t->control_tint,
                               t->control_opacity);
     ui_glass_surface_set_material(s_footer, t->control_material);
-    ui_glass_surface_set_edge_strength(s_footer, t->focus_edge_strength);
+    ui_glass_surface_set_edge_strength(
+        s_footer, s_page == SHOWCASE_NAVIGATION ? t->focus_edge_strength / 2
+                                               : t->focus_edge_strength);
     // 导航条在每一页都可见：它现在承担导航信息，不再只是动作提示。
     lv_obj_remove_flag(s_footer, LV_OBJ_FLAG_HIDDEN);
     link_dot_refresh();
@@ -2210,6 +2320,7 @@ static void show_page(showcase_page_t page, int8_t direction, bool animate)
     lv_obj_t *old = s_scene;
     lv_obj_t *incoming = scene_create();
     s_page = page;
+    s_mode_hint_ms = 3000;
     s_scene = incoming;
     scene_build(page, incoming);
 
@@ -2284,18 +2395,26 @@ static void master_tick(lv_timer_t *timer)
     (void)timer;
     // 链路点在转场期间也要刷，它不属于任何 scene。
     link_dot_refresh();
+    int battery = atomic_load(&s_battery_soc);
+    if (s_battery_label && battery != s_battery_drawn) {
+        s_battery_drawn = battery;
+        if (battery < 0) lv_label_set_text(s_battery_label, "--%");
+        else lv_label_set_text_fmt(s_battery_label, "%d%%", battery);
+    }
     if (s_transitioning) return;
+    adjustments_audio_refresh();
+    if (s_mode_hint_ms) {
+        s_mode_hint_ms = s_mode_hint_ms > SHOWCASE_TICK_MS
+                       ? s_mode_hint_ms - SHOWCASE_TICK_MS : 0;
+        if (!s_mode_hint_ms) shell_refresh();
+    }
 
     if (is_data_page(s_page)) {
         // 数据页：Kaboo 自动翻卡 + 从 BLE 快照刷新。手动翻卡后先暂停一会。
-        if (s_page == PAGE_KABOO) {
-            if (s_card_hold_ms > 0) {
-                s_card_hold_ms = s_card_hold_ms > SHOWCASE_TICK_MS
-                                     ? s_card_hold_ms - SHOWCASE_TICK_MS : 0;
-            } else {
-                s_card_elapsed_ms += SHOWCASE_TICK_MS;
-                if (s_card_elapsed_ms >= CARD_ROTATE_MS) kaboo_card_advance();
-            }
+        if (s_page == PAGE_KABOO && ui_dashboard_card_tick(
+                SHOWCASE_TICK_MS, s_scene_mode, CARD_ROTATE_MS,
+                &s_card_elapsed_ms, &s_card_hold_ms)) {
+            kaboo_card_advance();
         }
         refresh_data_page();
         // 无人巡航只在展示场景之间走：自动翻走一个实时看板毫无意义。
@@ -2327,9 +2446,16 @@ static void master_tick(lv_timer_t *timer)
 static void focused_action(void)
 {
     switch (s_page) {
-    case SHOWCASE_BUTTONS:
+    case SHOWCASE_BUTTONS: {
+        static const char *const results[] = {
+            "Demo | Open selected", "Demo | Share selected", "Demo | Remove selected",
+        };
         press_focused_component();
+        if (s_moments_result_label && s_focus.index < 3) {
+            lv_label_set_text(s_moments_result_label, results[s_focus.index]);
+        }
         break;
+    }
     case SHOWCASE_SELECTION:
         if (s_focus.index == 0) {
             segment_select((uint8_t)((s_segment_index + 1u) % 3u), true);
@@ -2343,6 +2469,10 @@ static void focused_action(void)
             s_selection_check = !s_selection_check;
             showcase_choice_set(&s_focus_components[2], s_selection_check,
                                 theme());
+            if (s_selection_canvas) {
+                lv_obj_set_style_bg_opa(s_selection_canvas,
+                    accessible_opacity(s_selection_check ? 160 : 64), 0);
+            }
         } else {
             s_selection_radio = !s_selection_radio;
             showcase_choice_set(&s_focus_components[3], s_selection_radio,
@@ -2354,14 +2484,19 @@ static void focused_action(void)
         break;
     case SHOWCASE_LISTS:
         press_focused_component();
-        if (s_focus.index < s_focus_count &&
-            s_focus_components[s_focus.index].value) {
-            lv_label_set_text(s_focus_components[s_focus.index].value,
-                              "OPEN");
+        if (s_devices_result_label && s_focus.index < s_focus_count) {
+            lv_label_set_text_fmt(s_devices_result_label,
+                                  "Demo | Device %u selected", s_focus.index + 1u);
         }
         break;
     case SHOWCASE_OVERLAYS:
         if (s_morph.open) {
+            static const char *const results[] = {
+                "Demo | Connect selected", "Demo | Sound selected", "Demo | Sleep selected",
+            };
+            if (s_player_demo_label && s_morph.item < 3) {
+                lv_label_set_text(s_player_demo_label, results[s_morph.item]);
+            }
             morph_toggle();
         } else {
             s_player_playing = !s_player_playing;
@@ -2392,12 +2527,14 @@ static void focused_action(void)
 
 void dashboard_set_battery(int soc)
 {
-    s_battery_soc = soc;
+    atomic_store(&s_battery_soc, soc >= 0 && soc <= 100 ? soc : -1);
 }
 
 void dashboard_enter(void)
 {
     s_page = SHOWCASE_OVERLAYS;
+    s_mode_hint_ms = 3000;
+    s_battery_drawn = -2;
     s_transitioning = false;
     ui_glass_set_optics_suppressed(false);
     s_tour_killed = !SHOWCASE_TOUR_ENABLED;
@@ -2422,9 +2559,11 @@ void dashboard_enter(void)
                               &lv_font_montserrat_14, t->text);
     lv_obj_set_size(s_battery_label, 36, 20);
     lv_obj_set_style_text_align(s_battery_label, LV_TEXT_ALIGN_RIGHT, 0);
-    if (s_battery_soc >= 0) {
-        lv_label_set_text_fmt(s_battery_label, "%d%%", s_battery_soc);
+    int battery = atomic_load(&s_battery_soc);
+    if (battery >= 0) {
+        lv_label_set_text_fmt(s_battery_label, "%d%%", battery);
     }
+    s_battery_drawn = battery;
     s_link_dot = solid_object(s_header_chrome, 210, 20, 10, 10,
                               LV_RADIUS_CIRCLE, t->text_muted, LV_OPA_COVER);
     s_footer = ui_glass_platter_create(
@@ -2483,8 +2622,11 @@ static void scene_step_direction(int8_t delta)
 {
     switch (s_page) {
     case PAGE_KABOO:
-        kaboo_card_advance();
+        s_kaboo_card = ui_dashboard_card_next(
+            s_kaboo_card, KABOO_CARD_COUNT, delta);
+        s_card_elapsed_ms = 0;
         s_card_hold_ms = CARD_MANUAL_HOLD_MS;
+        refresh_data_page();
         break;
     case SHOWCASE_OVERLAYS:
         if (s_morph.open) {
@@ -2530,10 +2672,15 @@ void dashboard_key(bsp_btn_t button, bsp_btn_ev_t event)
         } else {
             return;                  // 无页内交互：不进入，也不改 chrome
         }
+        s_mode_hint_ms = 3000;
         shell_refresh();
         return;
     }
     if (event != BSP_BTN_CLICK) return;
+    if (s_mode_hint_ms) {
+        s_mode_hint_ms = 0;
+        shell_refresh();
+    }
 
     if (!s_scene_mode) {
         // 浏览模式：UP/DOWN 就是翻页，符合三键设备的通用直觉。
@@ -2562,7 +2709,7 @@ void dashboard_key(bsp_btn_t button, bsp_btn_ev_t event)
         scene_step_direction(1);
     } else if (button == BSP_BTN_OK) {
         if (s_page == SHOWCASE_OVERLAYS && s_morph.open) {
-            morph_toggle();
+            focused_action();
         } else if (!is_data_page(s_page)) {
             focused_action();
         } else if (s_page == PAGE_KABOO) {

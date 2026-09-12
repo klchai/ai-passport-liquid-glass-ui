@@ -17,6 +17,8 @@
 
 #include "esp_log.h"
 #include "lvgl.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "main";
 
@@ -48,8 +50,8 @@ void app_main(void)
     bool buttons_ok = (bsp_button_init(on_key, NULL) == ESP_OK);
     if (!buttons_ok) ESP_LOGE(TAG, "按键初始化失败，无法翻页");
 
-    // 电量在这里读一次再交给 UI：I2C 读取留在 app_main，不进按键回调或
-    // LVGL timer。电量计初始化失败就显示 "--%"，不阻塞启动。
+    // Battery I2C stays in app_main; only an atomic value reaches the UI.
+    // Missing or temporarily unavailable readings display "--%".
     int battery_soc = (bsp_battery_init() == ESP_OK) ? bsp_battery_soc() : -1;
     dashboard_set_battery(battery_soc);
 
@@ -67,4 +69,12 @@ void app_main(void)
 
     ESP_LOGI(TAG, "就绪:Display=1 Button=%d BLE=%d",
              buttons_ok, ble_err == ESP_OK);
+
+    // Reuse the application task rather than allocate another worker stack.
+    // No LVGL objects are accessed here, including after dashboard_exit().
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(60000));
+        int soc = bsp_battery_init() == ESP_OK ? bsp_battery_soc() : -1;
+        dashboard_set_battery(soc);
+    }
 }
