@@ -9,7 +9,9 @@
 #include "usage_link.h"
 #include "time_sync.h"
 
+#include <stdatomic.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -46,8 +48,8 @@ static uint32_t          s_generation;      // 每次成功提交自增
 static bool              s_have_snapshot;
 
 static usage_link_state_t s_state = USAGE_LINK_IDLE;
-static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-static uint16_t s_mtu;
+static atomic_uint_fast16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+static atomic_uint_fast16_t s_mtu;
 static uint8_t  s_addr_type;
 static bool     s_started;
 
@@ -188,8 +190,18 @@ static int on_chr_write(struct ble_gatt_access_ctxt *ctxt)
 
     // 解码与校验在锁外的局部变量上完成，临界区只做整体赋值。
     usage_snapshot_t decoded;
+    time_t trusted_now = time(NULL);
+    uint32_t reference_unix = 0;
+    if (trusted_now >= 0) {
+        uint64_t trusted_now_u = (uint64_t)trusted_now;
+        if (trusted_now_u >= USAGE_EPOCH_MIN &&
+            trusted_now_u <= UINT32_MAX) {
+            reference_unix = (uint32_t)trusted_now_u;
+        }
+    }
     usage_decode_result_t result =
-        usage_model_decode(wire, sizeof wire, esp_timer_get_time(), &decoded);
+        usage_model_decode(wire, sizeof wire, esp_timer_get_time(),
+                           reference_unix, &decoded);
     if (result != USAGE_DECODE_OK) {
         ESP_LOGW(TAG, "payload 校验失败: %d（保留上一份快照）", (int)result);
         return BLE_ATT_ERR_UNLIKELY;
@@ -248,9 +260,11 @@ static int gap_event(struct ble_gap_event *event, void *arg)
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
-            s_conn_handle = event->connect.conn_handle;
-            s_mtu = ble_att_mtu(s_conn_handle);
-            ESP_LOGI(TAG, "已连接 handle=%u mtu=%u", s_conn_handle, s_mtu);
+            atomic_store(&s_conn_handle, event->connect.conn_handle);
+            uint16_t mtu = ble_att_mtu(event->connect.conn_handle);
+            atomic_store(&s_mtu, mtu);
+            ESP_LOGI(TAG, "已连接 handle=%u mtu=%u",
+                     event->connect.conn_handle, mtu);
             link_event(USAGE_LINK_EV_CONNECT_OK);
         } else {
             // 连接失败后 controller 已停止广播，必须显式恢复。
@@ -261,8 +275,8 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "断开: %d", event->disconnect.reason);
-        s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-        s_mtu = 0;
+        atomic_store(&s_conn_handle, BLE_HS_CONN_HANDLE_NONE);
+        atomic_store(&s_mtu, 0);
         // 漏掉这条会导致断连后设备永久不可再被发现。
         link_event(USAGE_LINK_EV_DISCONNECT);
         break;
@@ -272,8 +286,8 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         break;
 
     case BLE_GAP_EVENT_MTU:
-        s_mtu = event->mtu.value;
-        ESP_LOGI(TAG, "MTU 协商为 %u", s_mtu);
+        atomic_store(&s_mtu, event->mtu.value);
+        ESP_LOGI(TAG, "MTU 协商为 %u", event->mtu.value);
         break;
 
     default:
@@ -313,8 +327,8 @@ static void on_sync(void)
 static void on_reset(int reason)
 {
     ESP_LOGW(TAG, "host reset: %d", reason);
-    s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-    s_mtu = 0;
+    atomic_store(&s_conn_handle, BLE_HS_CONN_HANDLE_NONE);
+    atomic_store(&s_mtu, 0);
     ble_npl_callout_stop(&s_adv_retry);   // 排队中的重试对新一轮 sync 没意义
     s_reset_epoch++;                      // 已经出队在路上的那次也作废
     s_identity_ready = false;    // 地址要在下一次 on_sync 重新推导
@@ -414,10 +428,10 @@ bool usage_link_get(usage_snapshot_t *out, uint32_t *out_generation)
 
 bool usage_link_connected(void)
 {
-    return s_conn_handle != BLE_HS_CONN_HANDLE_NONE;
+    return atomic_load(&s_conn_handle) != BLE_HS_CONN_HANDLE_NONE;
 }
 
 uint16_t usage_link_mtu(void)
 {
-    return s_mtu;
+    return (uint16_t)atomic_load(&s_mtu);
 }

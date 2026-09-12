@@ -67,11 +67,15 @@ typedef enum {
 // epoch 合理区间：早于 2020-01-01 或远晚于当前授时都视为损坏。
 #define USAGE_EPOCH_MIN        1577836800u   // 2020-01-01T00:00:00Z
 #define USAGE_EPOCH_SKEW_MAX   86400u        // 允许比 generated_unix 晚一天
+#define USAGE_RESET_SKEW_MAX   (7u * 86400u) // 配额重置最多提前七天
 
 // 解码并校验。任一字段不合法即整体拒绝，调用方应保留上一份有效快照。
 // received_monotonic_us 由调用方传入（设备上是 esp_timer_get_time()）。
+// reference_unix 为接收端最近可信的 UTC 秒；传 0 表示当前尚无可信基准，
+// 此时仍执行最小 epoch 校验，但不执行未来偏移校验。
 usage_decode_result_t usage_model_decode(const uint8_t *wire, size_t len,
                                          int64_t received_monotonic_us,
+                                         uint32_t reference_unix,
                                          usage_snapshot_t *out);
 
 // ---- 时钟 ----

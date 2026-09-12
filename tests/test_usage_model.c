@@ -66,7 +66,7 @@ static void test_golden_vector(void)
     build_valid(wire);
 
     usage_snapshot_t s;
-    assert(usage_model_decode(wire, sizeof wire, 5000000, &s) == USAGE_DECODE_OK);
+    assert(usage_model_decode(wire, sizeof wire, 5000000, GEN_UNIX, &s) == USAGE_DECODE_OK);
 
     assert(s.version == USAGE_WIRE_VERSION);
     assert(s.generated_unix == GEN_UNIX);
@@ -95,59 +95,65 @@ static void test_rejects_bad_input(void)
 
     // 长度必须精确匹配，短包与长包都拒绝。
     build_valid(wire);
-    assert(usage_model_decode(wire, USAGE_WIRE_SIZE - 1, 0, &s) == USAGE_DECODE_BAD_LENGTH);
-    assert(usage_model_decode(wire, USAGE_WIRE_SIZE + 1, 0, &s) == USAGE_DECODE_BAD_LENGTH);
-    assert(usage_model_decode(NULL, USAGE_WIRE_SIZE, 0, &s) == USAGE_DECODE_BAD_LENGTH);
+    assert(usage_model_decode(wire, USAGE_WIRE_SIZE - 1, 0, GEN_UNIX, &s) == USAGE_DECODE_BAD_LENGTH);
+    assert(usage_model_decode(wire, USAGE_WIRE_SIZE + 1, 0, GEN_UNIX, &s) == USAGE_DECODE_BAD_LENGTH);
+    assert(usage_model_decode(NULL, USAGE_WIRE_SIZE, 0, GEN_UNIX, &s) == USAGE_DECODE_BAD_LENGTH);
 
     // 旧版 v1 与未来版本都要拒绝，不能只测一个方向。
     build_valid(wire);
     wire[0] = USAGE_WIRE_VERSION - 1;
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_BAD_VERSION);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_BAD_VERSION);
     build_valid(wire);
     wire[0] = USAGE_WIRE_VERSION + 1;
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_BAD_VERSION);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_BAD_VERSION);
 
     // 保留位必须为 0，否则说明对端用了本固件不认识的协议扩展。
     build_valid(wire);
     wire[1] |= 0x80;
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_RESERVED_FLAG);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_RESERVED_FLAG);
 
     build_valid(wire);
     wire[84] = 101;
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_BAD_PERCENT);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_BAD_PERCENT);
 
     build_valid(wire);
     wire[85] = 255;
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_BAD_PERCENT);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_BAD_PERCENT);
 
     build_valid(wire);
     put_le16(wire + 6, (uint16_t)(int16_t)-721);
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_BAD_TIMEZONE);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_BAD_TIMEZONE);
 
     build_valid(wire);
     put_le16(wire + 6, (uint16_t)(int16_t)841);
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_BAD_TIMEZONE);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_BAD_TIMEZONE);
 
     // 边界值本身应当被接受。
     build_valid(wire);
     put_le16(wire + 6, (uint16_t)(int16_t)-720);
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_OK);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_OK);
     build_valid(wire);
     put_le16(wire + 6, (uint16_t)(int16_t)840);
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_OK);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_OK);
     build_valid(wire);
     wire[84] = 100;
     wire[85] = 100;
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_OK);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_OK);
 
     // 1970 之类的损坏 epoch 必须拒绝，否则时间页会显示假时刻。
     build_valid(wire);
     put_le32(wire + 2, 100u);
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_BAD_EPOCH);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_BAD_EPOCH);
 
     build_valid(wire);
     put_le32(wire + 8, 100u);
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_BAD_EPOCH);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_BAD_EPOCH);
+
+    // The generated timestamp is bounded against the receiver's trusted clock;
+    // a far-future payload must not be allowed to poison time synchronization.
+    build_valid(wire);
+    put_le32(wire + 2, GEN_UNIX + USAGE_EPOCH_SKEW_MAX + 1u);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_BAD_EPOCH);
 }
 
 static void test_top_model_boundary(void)
@@ -158,14 +164,14 @@ static void test_top_model_boundary(void)
     // 发送方填满 24 字节且不留 NUL —— 接收侧必须强制截断。
     build_valid(wire);
     memset(wire + 60, 'A', USAGE_TOP_MODEL_CAP);
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_OK);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_OK);
     assert(strlen(s.top_model) == USAGE_TOP_MODEL_CAP - 1);
     assert(s.top_model[USAGE_TOP_MODEL_CAP - 1] == '\0');
 
     // 空模型名是合法的（kaboo 尚无数据时）。
     build_valid(wire);
     memset(wire + 60, 0, USAGE_TOP_MODEL_CAP);
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_OK);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_OK);
     assert(s.top_model[0] == '\0');
 }
 
@@ -175,7 +181,7 @@ static void test_clock(void)
     build_valid(wire);
 
     usage_snapshot_t s;
-    assert(usage_model_decode(wire, sizeof wire, 1000000, &s) == USAGE_DECODE_OK);
+    assert(usage_model_decode(wire, sizeof wire, 1000000, GEN_UNIX, &s) == USAGE_DECODE_OK);
 
     uint32_t now = 0;
     // 未同步时绝不给出时刻 —— UI 据此显示 "--:--"。
@@ -315,7 +321,7 @@ static void test_single_claude_window(void)
     wire[1] = USAGE_FLAG_KABOO_VALID | USAGE_FLAG_SEVEN_DAY;
     put_le32(wire + 86, 0);          // five_hour reset 缺失
     wire[84] = 0;                    // five_hour pct 缺失
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_OK);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_OK);
     assert(s.flags & USAGE_FLAG_KABOO_VALID);      // Kaboo 必须存活
     assert(s.flags & USAGE_FLAG_SEVEN_DAY);
     assert(!(s.flags & USAGE_FLAG_FIVE_HOUR));
@@ -327,7 +333,7 @@ static void test_single_claude_window(void)
     wire[1] = USAGE_FLAG_KABOO_VALID | USAGE_FLAG_FIVE_HOUR;
     put_le32(wire + 90, 0);          // seven_day reset 缺失
     wire[85] = 0;
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_OK);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_OK);
     assert(s.flags & USAGE_FLAG_FIVE_HOUR);
     assert(!(s.flags & USAGE_FLAG_SEVEN_DAY));
     assert(s.five_hour_pct == 13);
@@ -337,21 +343,21 @@ static void test_single_claude_window(void)
     build_valid(wire);
     wire[1] = USAGE_FLAG_KABOO_VALID | USAGE_FLAG_SEVEN_DAY;
     put_le32(wire + 90, 100u);       // seven_day reset 早于 2020
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_BAD_EPOCH);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_BAD_EPOCH);
 
     // 两个窗口都不声明：Kaboo 仍应通过。
     build_valid(wire);
     wire[1] = USAGE_FLAG_KABOO_VALID;
     put_le32(wire + 86, 0);
     put_le32(wire + 90, 0);
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_OK);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_OK);
     assert(!(s.flags & USAGE_FLAG_CLAUDE_VALID));
     assert(s.today_tokens == 144625529u);
 
     // 新的保留位掩码：bit3 及以上仍必须为 0。
     build_valid(wire);
     wire[1] |= 0x08;
-    assert(usage_model_decode(wire, sizeof wire, 0, &s) == USAGE_DECODE_RESERVED_FLAG);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_RESERVED_FLAG);
 }
 
 int main(void)

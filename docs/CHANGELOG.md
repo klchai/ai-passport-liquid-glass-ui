@@ -6,6 +6,11 @@
 
 ## Unreleased
 
+- Hardened BLE time updates by bounding generated timestamps against the
+  receiver clock, separating one-day sample skew from the seven-day quota-reset
+  horizon, and making connection status fields atomic. Wi-Fi now retries after
+  station disconnects so SNTP can recover without a reboot.
+
 - Home's hero now uses a battery ring with a live percentage, current local
   time, and date/weekday. Computer payloads synchronize the clock immediately;
   SNTP polls `ntp1.aliyun.com` when a network interface is available, persists

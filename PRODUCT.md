@@ -66,8 +66,8 @@ screen capture. The device is operated with UP, DOWN, and OK rather than touch.
 - Optical material profiles: `main/ui_glass_optics.*`.
 - RGB565 fused compositor and dirty-region planner:
   `main/ui_glass_compositor.*` and `main/liquid_glass_compositor_core.*`.
-- Continuous three-card motion study: `main/liquid_glass_motion.*` and
-  `main/demo_liquid_glass.c`.
+- Continuous motion study and showcase scenes: `main/liquid_glass_motion.*` and
+  `main/showcase_scenes.c`.
 - Device screenshot capture and display telemetry are implemented in the
   repository. No production performance claim should be invented without a
   captured device sample.

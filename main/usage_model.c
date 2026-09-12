@@ -46,11 +46,13 @@ static uint64_t get_le64(const uint8_t *p)
     return (uint64_t)get_le32(p) | ((uint64_t)get_le32(p + 4) << 32);
 }
 
-static bool epoch_plausible(uint32_t value, uint32_t reference)
+static bool epoch_plausible(uint32_t value, uint32_t reference,
+                            uint32_t max_future_skew)
 {
     if (value < USAGE_EPOCH_MIN) return false;
     // 允许略晚于授时基准（重置时刻本来就在未来），但不接受离谱的未来值。
-    if (value > reference && (value - reference) > (USAGE_EPOCH_SKEW_MAX * 400u)) {
+    if (reference >= USAGE_EPOCH_MIN && value > reference &&
+        (value - reference) > max_future_skew) {
         return false;
     }
     return true;
@@ -58,6 +60,7 @@ static bool epoch_plausible(uint32_t value, uint32_t reference)
 
 usage_decode_result_t usage_model_decode(const uint8_t *wire, size_t len,
                                          int64_t received_monotonic_us,
+                                         uint32_t reference_unix,
                                          usage_snapshot_t *out)
 {
     if (!wire || !out) return USAGE_DECODE_BAD_LENGTH;
@@ -77,7 +80,8 @@ usage_decode_result_t usage_model_decode(const uint8_t *wire, size_t len,
     if (tz < -720 || tz > 840) return USAGE_DECODE_BAD_TIMEZONE;
 
     uint32_t generated = get_le32(wire + OFF_GENERATED);
-    if (!epoch_plausible(generated, generated)) return USAGE_DECODE_BAD_EPOCH;
+    if (!epoch_plausible(generated, reference_unix,
+                         USAGE_EPOCH_SKEW_MAX)) return USAGE_DECODE_BAD_EPOCH;
 
     uint32_t kaboo_sampled = get_le32(wire + OFF_KABOO_SAMPLED);
     uint32_t claude_sampled = get_le32(wire + OFF_CLAUDE_SAMPLED);
@@ -86,18 +90,22 @@ usage_decode_result_t usage_model_decode(const uint8_t *wire, size_t len,
 
     // 只校验被 valid 位声明为有效的那部分时间戳；未使用的源允许为 0。
     if (flags & USAGE_FLAG_KABOO_VALID) {
-        if (!epoch_plausible(kaboo_sampled, generated)) return USAGE_DECODE_BAD_EPOCH;
+        if (!epoch_plausible(kaboo_sampled, generated,
+                             USAGE_EPOCH_SKEW_MAX)) return USAGE_DECODE_BAD_EPOCH;
     }
     // 每个 Claude 窗口独立校验：只有被声明有效的那个窗口的 reset 时刻需要
     // 合理。这样"只有 seven_day"的真实情况不会连带否掉整包。
     if (flags & USAGE_FLAG_CLAUDE_VALID) {
-        if (!epoch_plausible(claude_sampled, generated)) return USAGE_DECODE_BAD_EPOCH;
+        if (!epoch_plausible(claude_sampled, generated,
+                             USAGE_EPOCH_SKEW_MAX)) return USAGE_DECODE_BAD_EPOCH;
     }
     if (flags & USAGE_FLAG_FIVE_HOUR) {
-        if (!epoch_plausible(five_resets, generated)) return USAGE_DECODE_BAD_EPOCH;
+        if (!epoch_plausible(five_resets, generated,
+                             USAGE_RESET_SKEW_MAX)) return USAGE_DECODE_BAD_EPOCH;
     }
     if (flags & USAGE_FLAG_SEVEN_DAY) {
-        if (!epoch_plausible(seven_resets, generated)) return USAGE_DECODE_BAD_EPOCH;
+        if (!epoch_plausible(seven_resets, generated,
+                             USAGE_RESET_SKEW_MAX)) return USAGE_DECODE_BAD_EPOCH;
     }
 
     memset(out, 0, sizeof(*out));

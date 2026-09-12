@@ -128,6 +128,12 @@ static void wifi_time_event(void *arg, esp_event_base_t base,
     (void)event_data;
     if (base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         (void)esp_wifi_connect();
+    } else if (base == WIFI_EVENT &&
+               event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        // Keep trying after an unavailable AP or a transient link loss. The
+        // call only schedules the next association attempt; it does not block
+        // the Wi-Fi event task.
+        (void)esp_wifi_connect();
     } else if (base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP &&
                s_sntp_started) {
         // A fresh DHCP lease is the point at which DNS and UDP are usable.
