@@ -125,7 +125,8 @@ different from the stable internal component identifiers:
 
 1. Player: edge-to-edge media content, playback state, and a source-origin
    Quick Actions morph
-2. Home: floating Dock navigation with continuous selection and content motion
+2. Home: floating Dock navigation with continuous selection, a battery ring,
+   and a clock/date hero
 3. Focus: segmented mode selection, a toggle, choices, and one moving Focus Lens
 4. Controls: an animated glass slider thumb, stepper, and progress adjustment
 5. Devices: list traversal, persistent focus, and row activation feedback
@@ -136,16 +137,31 @@ different from the stable internal component identifiers:
 8. Appearance: Standard, High Contrast, Reduced Transparency, and Reduced Motion
    as selectable system profiles
 
-Kaboo and Claude follow Appearance as the ninth and tenth pages. Kaboo labels
-its token count and model; Claude labels percentages as used quota. Both show
-source age and visually distinguish stale values. Sample content and actions
-are identified as demonstrations. Controls shows real brightness and volume,
-including unavailable audio, while battery samples arrive once per minute.
+Kaboo and Claude follow Appearance as the ninth and tenth pages, and Settings is
+the eleventh. Kaboo labels its token count and model; Claude labels percentages
+as used quota. Both show source age and visually distinguish stale values.
+Sample content and actions are identified as demonstrations. Controls shows real
+brightness and volume, including unavailable audio, while battery samples arrive
+once per minute. Home's battery ring and clock/date hero are refreshed from the
+device clock; BLE computer payloads and `ntp1.aliyun.com` provide synchronization.
 
 Rapid focus, toggle, slider, and segmented input retargets the existing visual
 object from its sampled position rather than starting competing animations.
 High Contrast and Reduced Transparency apply to content canvases and to the
 Player, Home, and live-data surfaces as well as shared controls.
+
+
+Home is the fixed default landing page and remains visible. Settings is the
+eleventh page and also remains available. It lists ten content pages
+in presentation order, with four checkboxes per view. In scene mode UP/DOWN
+move selection and OK toggles visibility. Startup, page navigation, and footer
+neighbours follow the visible set; hiding optional pages leaves Home and Settings
+reachable. Home cannot be toggled off.
+A stable-ID bit mask is stored in application NVS under namespace `dashboard`,
+key `pages_v1`, without touching identity or Recovery. The UI publishes atomic
+snapshots and the application task coalesces writes once per second. Only a
+successful save is acknowledged; failure retains live session choices and
+shows an error.
 
 ## Runtime and performance
 

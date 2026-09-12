@@ -1,10 +1,11 @@
-// main/showcase_scenes.c —— 十页应用：八个 Liquid Glass 展示场景 + Kaboo + Claude。
+// main/showcase_scenes.c —— 八个展示场景 + Kaboo + Claude + Settings。
 //
-// 这是应用的全部 UI。八个展示场景演示交互原语；Kaboo / Claude 两页显示由
-// Mac 经 BLE 推来的实时数据（见 usage_link.c）。十页共用一个 runtime、一块
-// 屏幕、一套 header/footer chrome、一个 200ms 主定时器和同一个焦点/转场系统。
+// 这是应用的全部 UI。Settings 管理可见页面；Kaboo / Claude 两页显示由
+// Mac 经 BLE 推来的实时数据（见 usage_link.c）。十一个页面共用一个 runtime、
+// 一块屏幕、一套 header/footer chrome、一个 200ms
+// 主定时器和同一个焦点/转场系统。
 //
-// 按键约定（十页统一，模态；实现见 dashboard_key）：
+// 按键约定（十一个页面统一，模态；实现见 dashboard_key）：
 //   浏览模式  UP 上一页 / DOWN 下一页；OK 执行本页主操作
 //            （Kaboo 翻卡、Player 开关 Quick Actions、其余展示页执行焦点动作）
 //   长按 OK   在有页内交互的页面进入 / 退出页内模式（header 显示 ✎）
@@ -21,6 +22,9 @@
 #include "ui_glass_widgets.h"
 #include "usage_link.h"
 #include "ui_dashboard_cards.h"
+#include "ui_dashboard_pages.h"
+#include "dashboard_preferences.h"
+#include "time_sync.h"
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -42,7 +46,6 @@
 #define SHOWCASE_TOUR_ENABLED  false
 #define SHOWCASE_STEPS_ENABLED false
 
-#define SHOWCASE_PAGE_COUNT      10
 #define SHOWCASE_SCENE_Y         44
 #define SHOWCASE_SCENE_HEIGHT   276
 // One master tick drives everything. 200ms is the GCD of every period below,
@@ -78,24 +81,9 @@
 
 LV_FONT_DECLARE(font_digits_44);
 
-// 前八个是展示场景，保持原枚举顺序不变（页内状态表按枚举索引）；后两个是
-// 实时数据页。is_data_page() 依赖这个排列。
-typedef enum {
-    SHOWCASE_BUTTONS = 0,
-    SHOWCASE_SELECTION,
-    SHOWCASE_ADJUSTMENTS,
-    SHOWCASE_LISTS,
-    SHOWCASE_OVERLAYS,
-    SHOWCASE_NAVIGATION,
-    SHOWCASE_FEEDBACK,
-    SHOWCASE_STATES,
-    PAGE_KABOO,
-    PAGE_CLAUDE,
-} showcase_page_t;
-
 static bool is_data_page(showcase_page_t page)
 {
-    return page >= PAGE_KABOO;
+    return page == PAGE_KABOO || page == PAGE_CLAUDE;
 }
 
 // 该页是否有值得进入页内模式的交互。Claude 两卡同屏、无可操作元素，
@@ -149,7 +137,9 @@ typedef struct {
     lv_obj_t *title;
     lv_obj_t *subtitle;
     lv_obj_t *hero;
-    lv_obj_t *symbol;
+    lv_obj_t *battery_ring;
+    lv_obj_t *battery_percent;
+    lv_obj_t *status_icon;
     lv_obj_t *state_label;
     lv_obj_t *value_label;
     lv_obj_t *tab_items[3];
@@ -188,32 +178,11 @@ static const char *const PAGE_TITLES[SHOWCASE_PAGE_COUNT] = {
     "Appearance",
     "Kaboo",
     "Claude",
+    "Settings",
 };
 
 static const uint8_t SHOWCASE_BRIGHTNESS_LEVELS[] = {
     10, 40, 70, 100,
-};
-
-// The public reel starts with the two strongest content-first scenes, then
-// unfolds the interaction patterns that power them. Stable enum identities let
-// component state survive a reordered presentation sequence. The two live-data
-// pages sit at the back of the book so the demonstration reel stays intact.
-//
-// Footer width was measured against this order: the widest neighbour pair is
-// "Activity / Appearance" on Moments at 187px inside the 212px platter.
-// "Appearance" never sits beside "Moments", so the two longest names never
-// share a row. Reordering requires re-measuring.
-static const showcase_page_t PAGE_ORDER[SHOWCASE_PAGE_COUNT] = {
-    SHOWCASE_OVERLAYS,
-    SHOWCASE_NAVIGATION,
-    SHOWCASE_SELECTION,
-    SHOWCASE_ADJUSTMENTS,
-    SHOWCASE_LISTS,
-    SHOWCASE_FEEDBACK,
-    SHOWCASE_BUTTONS,
-    SHOWCASE_STATES,
-    PAGE_KABOO,
-    PAGE_CLAUDE,
 };
 
 static ui_glass_runtime_t s_runtime;
@@ -227,6 +196,8 @@ static int s_battery_drawn = -2;
 static uint32_t s_mode_hint_ms;
 static lv_obj_t *s_footer;
 static lv_obj_t *s_footer_label;
+static lv_obj_t *s_footer_left;
+static lv_obj_t *s_footer_right;
 // 按键模型分两个模式，避免同一个键在不同页面语义不同：
 //
 //   浏览模式（默认）  UP/DOWN = 上/下一页；OK = 执行当前页主操作；
@@ -299,6 +270,8 @@ static bool s_selection_radio = true;
 static uint8_t s_control_slider = 100;
 static uint8_t s_stepper_value = 3;
 static uint8_t s_navigation_index;
+static uint8_t s_settings_selection;
+static lv_obj_t *s_settings_note;
 static uint8_t s_device_volume = 70;
 static uint8_t s_feedback_state;
 static navigation_view_t s_navigation;
@@ -313,6 +286,8 @@ static void navigation_motion_set(void *value, int32_t progress);
 static void segment_motion_set(void *value, int32_t progress);
 static void focused_action(void);
 static void link_dot_refresh(void);
+static void navigation_clock_refresh(void);
+static void navigation_battery_refresh(void);
 
 static lv_obj_t *plain_object(lv_obj_t *parent, int x, int y,
                               int width, int height)
@@ -350,14 +325,6 @@ static lv_obj_t *text_at(lv_obj_t *parent, const char *text,
 static const ui_glass_theme_t *theme(void)
 {
     return ui_glass_runtime_theme(&s_runtime);
-}
-
-static uint8_t page_position(showcase_page_t page)
-{
-    for (uint8_t index = 0; index < SHOWCASE_PAGE_COUNT; ++index) {
-        if (PAGE_ORDER[index] == page) return index;
-    }
-    return 0;
 }
 
 static void set_label_color(lv_obj_t *label, uint32_t color)
@@ -539,6 +506,7 @@ static void stop_scene_activity(void)
     s_moments_result_label = NULL;
     s_devices_result_label = NULL;
     s_selection_canvas = NULL;
+    s_settings_note = NULL;
     memset(s_focus_components, 0, sizeof(s_focus_components));
 }
 
@@ -1443,6 +1411,58 @@ static void build_overlays(lv_obj_t *root)
     morph_menu_refresh(false);
 }
 
+static void navigation_clock_refresh(void)
+{
+    if (!s_navigation.state_label || !s_navigation.value_label) return;
+
+    time_sync_wall_clock_t now;
+    char time_text[8];
+    char date_text[24];
+    if (time_sync_get_wall_clock(&now)) {
+        static const char *const weekdays[] = {
+            "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat",
+        };
+        snprintf(time_text, sizeof(time_text), "%02d:%02d",
+                 now.hour, now.minute);
+        snprintf(date_text, sizeof(date_text), "%04d/%02d/%02d %s",
+                 now.year, now.month, now.day, weekdays[now.weekday]);
+    } else {
+        // Until the first computer or NTP sync, avoid presenting the Unix
+        // epoch as a real date. The system clock continues from the last
+        // persisted value when one is available.
+        snprintf(time_text, sizeof(time_text), "--:--");
+        snprintf(date_text, sizeof(date_text), "----/--/-- ---");
+    }
+
+    if (strcmp(lv_label_get_text(s_navigation.state_label), time_text) != 0) {
+        lv_label_set_text(s_navigation.state_label, time_text);
+    }
+    if (strcmp(lv_label_get_text(s_navigation.value_label), date_text) != 0) {
+        lv_label_set_text(s_navigation.value_label, date_text);
+    }
+}
+
+static void navigation_battery_refresh(void)
+{
+    if (!s_navigation.battery_ring || !s_navigation.battery_percent) return;
+    int battery = atomic_load(&s_battery_soc);
+    int visible = battery >= 0 ? battery : 0;
+    if (lv_arc_get_value(s_navigation.battery_ring) != visible) {
+        lv_arc_set_value(s_navigation.battery_ring, visible);
+    }
+    char percent_text[8];
+    if (battery < 0) {
+        strcpy(percent_text, "--%");
+    } else {
+        uint8_t battery_value = (uint8_t)battery;
+        snprintf(percent_text, sizeof(percent_text), "%u%%",
+                 (unsigned)battery_value);
+    }
+    if (strcmp(lv_label_get_text(s_navigation.battery_percent), percent_text) != 0) {
+        lv_label_set_text(s_navigation.battery_percent, percent_text);
+    }
+}
+
 static void navigation_content_update(uint8_t index)
 {
     static const char *const titles[] = {
@@ -1461,11 +1481,22 @@ static void navigation_content_update(uint8_t index)
     lv_label_set_text(s_navigation.subtitle, subtitles[index]);
     lv_obj_set_style_bg_color(s_navigation.hero,
                               lv_color_hex(colors[index]), 0);
-    lv_label_set_text(s_navigation.symbol, symbols[index]);
-    lv_label_set_text(s_navigation.state_label,
-                      index == 0 ? "BATTERY" : index == 1 ? "PROGRESS" : "SIGNAL");
-    lv_label_set_text(s_navigation.value_label,
-                      index == 0 ? "100%" : index == 1 ? "42%" : "-48 dBm");
+    lv_label_set_text(s_navigation.status_icon, symbols[index]);
+    if (index == 0) {
+        lv_obj_add_flag(s_navigation.status_icon, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_navigation.battery_ring, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_navigation.battery_percent, LV_OBJ_FLAG_HIDDEN);
+        navigation_clock_refresh();
+        navigation_battery_refresh();
+    } else {
+        lv_obj_clear_flag(s_navigation.status_icon, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_navigation.battery_ring, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_navigation.battery_percent, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(s_navigation.state_label,
+                          index == 1 ? "PROGRESS" : "SIGNAL");
+        lv_label_set_text(s_navigation.value_label,
+                          index == 1 ? "42%" : "-48 dBm");
+    }
 }
 
 static void navigation_content_create(lv_obj_t *panel,
@@ -1486,15 +1517,50 @@ static void navigation_content_create(lv_obj_t *panel,
     s_navigation.hero = solid_object(s_navigation.content, 0, 76, 212, 76,
                                      UI_GLASS_RADIUS_PANEL, 0x3B93C5,
                                      LV_OPA_COVER);
-    lv_obj_t *orb = solid_object(s_navigation.hero, 14, 14, 56, 56,
-                                 LV_RADIUS_CIRCLE, t->text, 34);
-    s_navigation.symbol = ui_glass_label(
-        orb, "", &lv_font_montserrat_20, t->text);
-    lv_obj_center(s_navigation.symbol);
+    s_navigation.battery_ring = lv_arc_create(s_navigation.hero);
+    lv_obj_set_pos(s_navigation.battery_ring, 14, 14);
+    lv_obj_set_size(s_navigation.battery_ring, 56, 56);
+    lv_obj_remove_flag(s_navigation.battery_ring, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_opa(s_navigation.battery_ring, LV_OPA_TRANSP,
+                            LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_navigation.battery_ring, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_navigation.battery_ring, 0, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_navigation.battery_ring, 4, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(s_navigation.battery_ring,
+                               lv_color_hex(t->text_muted), LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(s_navigation.battery_ring, LV_OPA_50,
+                             LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_navigation.battery_ring, 4,
+                               LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(s_navigation.battery_ring,
+                               lv_color_hex(t->accent), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_opa(s_navigation.battery_ring, LV_OPA_COVER,
+                             LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(s_navigation.battery_ring, LV_OPA_TRANSP,
+                            LV_PART_KNOB);
+    lv_obj_set_style_border_width(s_navigation.battery_ring, 0, LV_PART_KNOB);
+    lv_arc_set_range(s_navigation.battery_ring, 0, 100);
+    lv_arc_set_bg_angles(s_navigation.battery_ring, 135, 405);
+    lv_arc_set_angles(s_navigation.battery_ring, 135, 135);
+
+    s_navigation.battery_percent = text_at(
+        s_navigation.hero, "--%", 14, 32, &lv_font_montserrat_14, t->text);
+    lv_obj_set_size(s_navigation.battery_percent, 56, 20);
+    lv_obj_set_style_text_align(s_navigation.battery_percent,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    s_navigation.status_icon = ui_glass_label(
+        s_navigation.hero, "", &lv_font_montserrat_20, t->text);
+    lv_obj_set_pos(s_navigation.status_icon, 14, 29);
+    lv_obj_set_size(s_navigation.status_icon, 56, 28);
+    lv_obj_set_style_text_align(s_navigation.status_icon,
+                                LV_TEXT_ALIGN_CENTER, 0);
     s_navigation.state_label = text_at(
         s_navigation.hero, "", 88, 22, &lv_font_montserrat_14, t->text);
+    lv_obj_set_width(s_navigation.state_label, 116);
     s_navigation.value_label = text_at(
         s_navigation.hero, "", 88, 46, &lv_font_montserrat_14, t->text_muted);
+    lv_obj_set_width(s_navigation.value_label, 116);
+    lv_label_set_long_mode(s_navigation.value_label, LV_LABEL_LONG_DOT);
 
     navigation_content_update(s_navigation_index);
 }
@@ -1747,6 +1813,52 @@ static void build_states(lv_obj_t *root)
             i == s_runtime.mode ? "ON" : "", t);
     }
     focus_bind(lens, UI_GLASS_MODE_COUNT, (uint8_t)s_runtime.mode);
+}
+
+static void settings_status_refresh(void)
+{
+    if (s_page != PAGE_SETTINGS || !s_settings_note) return;
+    dashboard_preferences_status_t status = dashboard_preferences_status();
+    const char *text = status == DASHBOARD_PREFS_SAVED ? "Saved on device"
+                     : status == DASHBOARD_PREFS_PENDING ? "Saving..."
+                     : "Not saved (session only)";
+    if (strcmp(lv_label_get_text(s_settings_note), text) != 0) {
+        lv_label_set_text(s_settings_note, text);
+        set_label_color(s_settings_note,
+                         status == DASHBOARD_PREFS_ERROR ? theme()->warning
+                                                         : theme()->text_muted);
+    }
+}
+
+static void build_settings(lv_obj_t *root)
+{
+    const ui_glass_theme_t *t = theme();
+    lv_obj_t *stage = showcase_content_stage_create(root, t);
+    uint8_t first = ui_dashboard_settings_first(s_settings_selection);
+    uint8_t count = PAGE_SETTINGS - first;
+    if (count > UI_DASHBOARD_SETTINGS_ROWS) count = UI_DASHBOARD_SETTINGS_ROWS;
+    lv_obj_t *range = text_at(stage, "", 14, 0, &lv_font_montserrat_14,
+                              t->text_muted);
+    lv_label_set_text_fmt(range, "Show pages  %u-%u / %u",
+                          first + 1u, first + count, (unsigned)PAGE_SETTINGS);
+    lv_obj_t *lens = ui_glass_focus_lens_create(stage, 6, 22, 196, 42, t);
+    uint16_t mask = dashboard_preferences_pages();
+    for (uint8_t i = 0; i < count; ++i) {
+        showcase_page_t page = UI_DASHBOARD_PAGE_ORDER[first + i];
+        s_focus_y[i] = 22 + i * 42;
+        s_focus_h[i] = 42;
+        s_focus_components[i] = showcase_choice_create(
+            stage, s_focus_y[i],
+            page == SHOWCASE_NAVIGATION ? "Home (always on)" : PAGE_TITLES[page],
+            ui_dashboard_page_visible(mask, page), false, t);
+        if (i + 1u < count) content_divider_create(stage, s_focus_y[i] + 41, t);
+    }
+    focus_bind(lens, count, s_settings_selection - first);
+    s_settings_note = text_at(root, "", 28, 206,
+                              &lv_font_montserrat_14, t->text_muted);
+    lv_obj_set_size(s_settings_note, 184, lv_font_montserrat_14.line_height);
+    lv_label_set_long_mode(s_settings_note, LV_LABEL_LONG_DOT);
+    settings_status_refresh();
 }
 
 static lv_obj_t *scene_create(void)
@@ -2119,6 +2231,14 @@ static void refresh_data_page(void)
     else refresh_claude(&snap, have);
 }
 
+static const char *footer_page_title(showcase_page_t page)
+{
+    // The two footer slots are intentionally narrow so they remain readable
+    // beside the directional glyphs. Appearance is the only page name that
+    // exceeds that slot at the footer font size.
+    return page == SHOWCASE_STATES ? "Appear." : PAGE_TITLES[page];
+}
+
 static void kaboo_card_advance(void)
 {
     s_kaboo_card = ui_dashboard_card_next(s_kaboo_card, KABOO_CARD_COUNT, 1);
@@ -2142,6 +2262,7 @@ static void scene_build(showcase_page_t page, lv_obj_t *root)
     case SHOWCASE_STATES:        build_states(content); break;
     case PAGE_KABOO:             build_kaboo(content); break;
     case PAGE_CLAUDE:            build_claude(content); break;
+    case PAGE_SETTINGS:          build_settings(content); break;
     default:                     build_buttons(content); break;
     }
     // 数据页建好后立刻用最后一份快照填充，不等下一个 tick 留出空白帧。
@@ -2153,13 +2274,12 @@ static void scene_build(showcase_page_t page, lv_obj_t *root)
 static void shell_refresh(void)
 {
     const ui_glass_theme_t *t = theme();
-    uint8_t position = page_position(s_page);
+    uint16_t mask = dashboard_preferences_pages();
     // Keep the entire title slot for the page name; mode lives in the footer.
     lv_label_set_text(s_header_title, PAGE_TITLES[s_page]);
     set_label_color(s_header_title, s_scene_mode ? t->accent : t->text);
-    uint8_t left = (uint8_t)((position + SHOWCASE_PAGE_COUNT - 1u) %
-                             SHOWCASE_PAGE_COUNT);
-    uint8_t right = (uint8_t)((position + 1u) % SHOWCASE_PAGE_COUNT);
+    showcase_page_t left = ui_dashboard_page_next(mask, s_page, -1);
+    showcase_page_t right = ui_dashboard_page_next(mask, s_page, 1);
     if (s_mode_hint_ms && page_has_scene_interaction(s_page)) {
         lv_label_set_text(s_footer_label,
                           s_scene_mode ? "Hold OK: exit controls"
@@ -2168,6 +2288,8 @@ static void shell_refresh(void)
         if (s_page == SHOWCASE_ADJUSTMENTS) {
             lv_label_set_text(s_footer_label,
                               LV_SYMBOL_UP LV_SYMBOL_DOWN " adjust   OK next");
+        } else if (s_page == PAGE_SETTINGS) {
+            lv_label_set_text(s_footer_label, LV_SYMBOL_UP LV_SYMBOL_DOWN " move   OK show/hide");
         } else if (s_page == PAGE_KABOO) {
             lv_label_set_text(s_footer_label,
                               LV_SYMBOL_UP LV_SYMBOL_DOWN " cards   OK next");
@@ -2175,11 +2297,27 @@ static void shell_refresh(void)
             lv_label_set_text(s_footer_label,
                               LV_SYMBOL_UP LV_SYMBOL_DOWN "  move    OK  use");
         }
+    } else if (left == s_page && right == s_page) {
+        lv_label_set_text(s_footer_label, "OK: choose pages");
     } else {
-        lv_label_set_text_fmt(
-            s_footer_label, LV_SYMBOL_LEFT "  %s   %s  " LV_SYMBOL_RIGHT,
-            PAGE_TITLES[PAGE_ORDER[left]], PAGE_TITLES[PAGE_ORDER[right]]);
+        lv_label_set_text_fmt(s_footer_left, LV_SYMBOL_LEFT " %s",
+                              footer_page_title(left));
+        lv_label_set_text_fmt(s_footer_right, "%s " LV_SYMBOL_RIGHT,
+                              footer_page_title(right));
     }
+    bool show_hint = s_scene_mode || (left == s_page && right == s_page) ||
+                     (s_mode_hint_ms && page_has_scene_interaction(s_page));
+    if (show_hint) {
+        lv_obj_remove_flag(s_footer_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_footer_left, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_footer_right, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_footer_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_footer_left, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_footer_right, LV_OBJ_FLAG_HIDDEN);
+    }
+    set_label_color(s_footer_left, t->text_muted);
+    set_label_color(s_footer_right, t->text_muted);
     set_label_color(s_footer_label, t->text_muted);
     ui_glass_surface_set_tint(s_footer, t->control_tint,
                               t->control_opacity);
@@ -2274,7 +2412,7 @@ static void scene_showcase_step(void)
         break;
     case SHOWCASE_STATES:
         // 无人巡航只演示焦点移动，不真的应用无障碍模式。模式存在共享
-        // runtime 里，应用后会重新主题化全部十页；在无限循环的巡航里那意味着
+        // runtime 里，应用后会重新主题化全部十一个页面；在无限循环的巡航里那意味着
         // Kaboo / Claude 每 70 秒换一次配色。用户按 OK 时才切换。
         if (s_scene_step <= 2) focus_move(1);
         else scene_timer_finish();
@@ -2291,7 +2429,7 @@ static void start_scene_showcase(void)
     s_scene_step = 0;
     s_step_elapsed_ms = 0;
     // 数据页没有步进表；关闭步进演示时所有页都直接标记完成。
-    s_scene_done = !SHOWCASE_STEPS_ENABLED || is_data_page(s_page);
+    s_scene_done = !SHOWCASE_STEPS_ENABLED || is_data_page(s_page) || s_page == PAGE_SETTINGS;
 }
 
 static void page_transition_completed(lv_anim_t *animation)
@@ -2366,11 +2504,9 @@ static void show_page(showcase_page_t page, int8_t direction, bool animate)
 
 static void navigate_showcase_page(int8_t direction)
 {
-    uint8_t index = page_position(s_page);
-    index = (uint8_t)((index +
-                       (direction < 0 ? SHOWCASE_PAGE_COUNT - 1 : 1)) %
-                      SHOWCASE_PAGE_COUNT);
-    show_page(PAGE_ORDER[index], direction, true);
+    showcase_page_t next = ui_dashboard_page_next(
+        dashboard_preferences_pages(), s_page, direction);
+    if (next != s_page) show_page(next, direction, true);
 }
 
 static void rebuild_page(void)
@@ -2401,8 +2537,11 @@ static void master_tick(lv_timer_t *timer)
         if (battery < 0) lv_label_set_text(s_battery_label, "--%");
         else lv_label_set_text_fmt(s_battery_label, "%d%%", battery);
     }
+    navigation_battery_refresh();
+    if (s_navigation_index == 0) navigation_clock_refresh();
     if (s_transitioning) return;
     adjustments_audio_refresh();
+    settings_status_refresh();
     if (s_mode_hint_ms) {
         s_mode_hint_ms = s_mode_hint_ms > SHOWCASE_TICK_MS
                        ? s_mode_hint_ms - SHOWCASE_TICK_MS : 0;
@@ -2435,10 +2574,14 @@ static void master_tick(lv_timer_t *timer)
         s_tour_elapsed_ms += SHOWCASE_TICK_MS;
         if (s_tour_elapsed_ms >= SHOWCASE_TOUR_PERIOD_MS) {
             s_tour_elapsed_ms = 0;
-            uint8_t next = (uint8_t)((page_position(s_page) + 1u) %
-                                     SHOWCASE_PAGE_COUNT);
-            if (is_data_page(PAGE_ORDER[next])) next = 0;
-            show_page(PAGE_ORDER[next], 1, true);
+            showcase_page_t next = s_page;
+            for (unsigned i = 0; i < SHOWCASE_PAGE_COUNT; ++i) {
+                next = ui_dashboard_page_next(dashboard_preferences_pages(), next, 1);
+                if (!is_data_page(next) && next != PAGE_SETTINGS) break;
+            }
+            if (next != s_page && !is_data_page(next) && next != PAGE_SETTINGS) {
+                show_page(next, 1, true);
+            }
         }
     }
 }
@@ -2446,6 +2589,27 @@ static void master_tick(lv_timer_t *timer)
 static void focused_action(void)
 {
     switch (s_page) {
+    case PAGE_SETTINGS: {
+        if (!s_scene_mode) {
+            s_scene_mode = true;
+            s_mode_hint_ms = 3000;
+            shell_refresh();
+            break;
+        }
+        showcase_page_t page = UI_DASHBOARD_PAGE_ORDER[s_settings_selection];
+        if (page == SHOWCASE_NAVIGATION) {
+            lv_label_set_text(s_settings_note, "Home is always on");
+            set_label_color(s_settings_note, theme()->text_muted);
+            break;
+        }
+        uint16_t mask = ui_dashboard_page_toggle(dashboard_preferences_pages(), page);
+        dashboard_preferences_set_pages(mask);
+        showcase_choice_set(&s_focus_components[s_focus.index],
+                             ui_dashboard_page_visible(mask, page), theme());
+        settings_status_refresh();
+        shell_refresh();
+        break;
+    }
     case SHOWCASE_BUTTONS: {
         static const char *const results[] = {
             "Demo | Open selected", "Demo | Share selected", "Demo | Remove selected",
@@ -2532,7 +2696,8 @@ void dashboard_set_battery(int soc)
 
 void dashboard_enter(void)
 {
-    s_page = SHOWCASE_OVERLAYS;
+    s_page = ui_dashboard_page_first(dashboard_preferences_pages());
+    s_settings_selection = 0;
     s_mode_hint_ms = 3000;
     s_battery_drawn = -2;
     s_transitioning = false;
@@ -2577,6 +2742,14 @@ void dashboard_enter(void)
     lv_obj_set_size(s_footer_label, 212, 20);
     lv_obj_set_style_text_align(s_footer_label, LV_TEXT_ALIGN_CENTER, 0);
 
+    s_footer_left = text_at(s_footer, "", 6, 7, &lv_font_montserrat_14, t->text_muted);
+    s_footer_right = text_at(s_footer, "", 108, 7, &lv_font_montserrat_14, t->text_muted);
+    lv_obj_set_size(s_footer_left, 98, 20);
+    lv_obj_set_size(s_footer_right, 98, 20);
+    lv_label_set_long_mode(s_footer_left, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(s_footer_right, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(s_footer_right, LV_TEXT_ALIGN_RIGHT, 0);
+
     s_scene = scene_create();
     scene_build(s_page, s_scene);
     shell_refresh();
@@ -2612,6 +2785,8 @@ void dashboard_exit(void)
     s_battery_label = NULL;
     s_footer = NULL;
     s_footer_label = NULL;
+    s_footer_left = NULL;
+    s_footer_right = NULL;
     memset(&s_page_motion, 0, sizeof(s_page_motion));
     memset(&s_kaboo_view, 0, sizeof(s_kaboo_view));
     memset(&s_claude_view, 0, sizeof(s_claude_view));
@@ -2621,6 +2796,20 @@ void dashboard_exit(void)
 static void scene_step_direction(int8_t delta)
 {
     switch (s_page) {
+    case PAGE_SETTINGS: {
+        uint8_t first = ui_dashboard_settings_first(s_settings_selection);
+        s_settings_selection = ui_dashboard_card_next(
+            s_settings_selection, PAGE_SETTINGS, delta);
+        if (first != ui_dashboard_settings_first(s_settings_selection)) {
+            uint32_t hint = s_mode_hint_ms;
+            rebuild_page();
+            s_mode_hint_ms = hint;
+            shell_refresh();
+        } else {
+            focus_move(delta);
+        }
+        break;
+    }
     case PAGE_KABOO:
         s_kaboo_card = ui_dashboard_card_next(
             s_kaboo_card, KABOO_CARD_COUNT, delta);

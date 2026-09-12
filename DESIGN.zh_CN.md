@@ -111,7 +111,7 @@ Slider。Morph Menu、Dock 和 Device Status 已在 Showcase 中验证，但在�
 场景承载，不再把实现分类直接展示给观众。页面顺序与稳定的内部组件标识刻意解耦：
 
 1. Player：通栏媒体内容、播放状态，以及从原控件展开的 Quick Actions Morph
-2. Home：带连续选区与内容运动的悬浮 Dock 导航
+2. Home：带连续选区与内容运动的悬浮 Dock 导航，以及电量圆环和时间/日期卡片
 3. Focus：分段模式、Toggle、选择项，以及唯一且连续移动的 Focus Lens
 4. Controls：带动画的玻璃 Slider Knob、Stepper 和可调 Progress
 5. Devices：列表遍历、持续焦点与 Row 激活反馈
@@ -120,14 +120,23 @@ Slider。Morph Menu、Dock 和 Device Status 已在 Showcase 中验证，但在�
 8. Appearance：可选择 Standard、High Contrast、Reduced Transparency 与 Reduced
    Motion 系统 Profile
 
-Kaboo 与 Claude 位于 Appearance 之后，分别为第九、第十页。Kaboo 标明 token
-计数与模型，Claude 明确百分比是已用配额。两页均显示采样新鲜度并弱化旧值。
+Kaboo 与 Claude 位于 Appearance 之后，分别为第九、第十页，Settings 为第十一页。
+Kaboo 标明 token 计数与模型，Claude 明确百分比是已用配额。两页均显示采样新鲜度并弱化旧值。
 示例内容与操作明确标记为演示。Controls 显示真实亮度与音量，以及音频不可用状态，
-电量采样每分钟更新一次。
+电量采样每分钟更新一次。Home 的电量圆环与时间/日期卡片来自设备时钟；电脑 BLE
+payload 和 `ntp1.aliyun.com` 提供校时。
 
 快速操作 Focus、Toggle、Slider 和 Segmented 时，从视觉对象当前采样位置重新
 定向，不启动互相竞争的动画。High Contrast 与 Reduced Transparency 除了应用于
 共享控件，也覆盖内容画布、Player、Home 与实时数据页面。
+
+
+Home 是固定默认首页并始终显示。Settings 是第十一页，也始终保留。它按展示顺序
+列出十个内容页，每屏四个复选框。
+页内 UP/DOWN 移动选项，OK 切换可见性。启动、翻页和底栏邻居页名均遵守可见集合，
+隐藏可选页面后仍可访问 Home 与 Settings，Home 不能切换关闭。设置以稳定页面 ID 的位掩码保存到应用 NVS 的 `dashboard`
+命名空间、`pages_v1` 键，读写不涉及身份区或 Recovery。UI 只发布原子快照，应用
+任务每秒合并保存一次；只有保存成功才显示已保存，失败保留会话设置并提示。
 
 ## Runtime 与性能
 

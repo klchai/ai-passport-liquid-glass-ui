@@ -1,7 +1,7 @@
-// main/main.c —— 十页应用固件入口。
+// main/main.c —— 看板应用固件入口。
 //
-// 与上游 demo 版本的关键差别：本固件没有 demo 菜单。开机直接进十页轮播
-// （八个 Liquid Glass 展示场景 + Kaboo token 用量 + Claude 限额），UP 翻页。
+// 本固件没有 demo 菜单。开机进入 Home；Settings 始终可访问。
+// 浏览时 UP / DOWN 翻页，Settings 选择显示哪些内容页。
 //
 // BLE 是应用级常驻服务：在这里启动一次，页面切换不参与其生命周期。
 // 整个固件中只有 usage_link.c 允许调用 nimble_port_init()。
@@ -12,7 +12,10 @@
 #include "bsp_i2c.h"
 #include "bsp_pins.h"
 #include "dashboard.h"
+#include "dashboard_preferences.h"
+#include "esp_timer.h"
 #include "fap_screenshot.h"
+#include "time_sync.h"
 #include "usage_link.h"
 
 #include "esp_log.h"
@@ -47,6 +50,9 @@ void app_main(void)
     }
     bsp_display_backlight(100);
 
+    dashboard_preferences_init();
+    time_sync_init();
+
     bool buttons_ok = (bsp_button_init(on_key, NULL) == ESP_OK);
     if (!buttons_ok) ESP_LOGE(TAG, "按键初始化失败，无法翻页");
 
@@ -72,9 +78,15 @@ void app_main(void)
 
     // Reuse the application task rather than allocate another worker stack.
     // No LVGL objects are accessed here, including after dashboard_exit().
+    int64_t next_battery_us = esp_timer_get_time() + 60000000;
     for (;;) {
-        vTaskDelay(pdMS_TO_TICKS(60000));
-        int soc = bsp_battery_init() == ESP_OK ? bsp_battery_soc() : -1;
-        dashboard_set_battery(soc);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        time_sync_poll();
+        dashboard_preferences_flush();
+        if (esp_timer_get_time() >= next_battery_us) {
+            int soc = bsp_battery_init() == ESP_OK ? bsp_battery_soc() : -1;
+            dashboard_set_battery(soc);
+            next_battery_us = esp_timer_get_time() + 60000000;
+        }
     }
 }

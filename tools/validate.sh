@@ -56,6 +56,16 @@ run_static_checks() {
         tests/test_ui_dashboard_cards.c main/ui_dashboard_cards.c \
         -o "${test_dir}/test_ui_dashboard_cards"
     "${test_dir}/test_ui_dashboard_cards"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_ui_dashboard_pages.c main/ui_dashboard_pages.c \
+        -o "${test_dir}/test_ui_dashboard_pages"
+    "${test_dir}/test_ui_dashboard_pages"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain -Itests/nvs_stub \
+        tests/test_dashboard_preferences.c main/dashboard_preferences.c \
+        main/ui_dashboard_pages.c -o "${test_dir}/test_dashboard_preferences"
+    "${test_dir}/test_dashboard_preferences"
+    "${test_dir}/test_dashboard_preferences" restart
+    "${test_dir}/test_dashboard_preferences" unavailable
     # The committed digit font must match what the generator produces from the
     # checked-in TTF and SYMBOLS; a stale copy would silently draw empty boxes
     # for any glyph added to SYMBOLS but not regenerated.

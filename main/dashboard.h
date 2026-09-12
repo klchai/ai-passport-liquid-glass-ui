@@ -1,6 +1,6 @@
-// main/dashboard.h —— 十页应用的入口（实现在 showcase_scenes.c）。
+// main/dashboard.h —— 看板应用的入口（实现在 showcase_scenes.c）。
 //
-// 八个 Liquid Glass 展示场景 + Kaboo token 用量 + Claude 限额，共用一个
+// 八个展示场景 + Kaboo 用量 + Claude 限额 + Settings，共用一个
 // runtime、一块屏幕、一套 header/footer 与一个 200ms 主定时器。
 // 实时数据由 usage_link.c 经 BLE 接收，本模块只渲染。
 #pragma once

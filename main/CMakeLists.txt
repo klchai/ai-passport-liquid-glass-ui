@@ -4,6 +4,9 @@ idf_component_register(
          "usage_link.c"
          "usage_model.c"
          "ui_dashboard_cards.c"
+         "ui_dashboard_pages.c"
+         "dashboard_preferences.c"
+         "time_sync.c"
          "font_digits_44.c"
          "ui_pixel_math.c"
          "ui_glass.c"
@@ -19,7 +22,8 @@ idf_component_register(
          "ui_glass_compositor.c"
          "fap_screenshot.c"
     INCLUDE_DIRS "."
-    REQUIRES bsp bt esp_driver_usb_serial_jtag esp_hw_support esp_timer lvgl
+    REQUIRES bsp bt esp_driver_usb_serial_jtag esp_hw_support esp_timer lvgl lwip
+             esp_netif
              nvs_flash
     EMBED_FILES "../assets/images/liquid_glass_wallpaper.rgb565"
 )

@@ -7,6 +7,7 @@
 //    mutex + generation 一次性发布，UI 侧轮询取副本。
 //  - 快照有 USAGE_WIRE_SIZE 字节，volatile 无法保证原子发布，必须走锁。
 #include "usage_link.h"
+#include "time_sync.h"
 
 #include <string.h>
 
@@ -193,6 +194,12 @@ static int on_chr_write(struct ble_gatt_access_ctxt *ctxt)
         ESP_LOGW(TAG, "payload 校验失败: %d（保留上一份快照）", (int)result);
         return BLE_ATT_ERR_UNLIKELY;
     }
+
+    // The host payload carries its UTC generation time and local offset. It
+    // is the immediate computer-sync path; the application task applies it
+    // outside this NimBLE callback.
+    time_sync_offer_computer(decoded.generated_unix,
+                             decoded.tz_offset_minutes);
 
     if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         return BLE_ATT_ERR_UNLIKELY;

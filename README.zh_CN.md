@@ -4,7 +4,7 @@
 
 # ESP32-C3 上的 Liquid Glass UI
 
-这是一套面向 AI Passport 硬件的十页应用，包含八个交互场景和两个实时用量看板：
+这是一套面向 AI Passport 硬件的应用，包含八个交互场景、两个实时用量看板与 Settings：
 240×320 屏幕、三个实体
 按键、8 MB Flash，并且没有 PSRAM。
 
@@ -21,9 +21,9 @@
 | Devices | Activity | Moments | Appearance |
 | <img src="design/screenshots/05-devices.png" width="180" alt="Devices 场景"> | <img src="design/screenshots/06-activity.png" width="180" alt="Activity 场景"> | <img src="design/screenshots/07-moments.png" width="180" alt="Moments 场景"> | <img src="design/screenshots/08-appearance.png" width="180" alt="Appearance 场景"> |
 
-上图为最初八场景版本的截图。当前应用从 Player 启动，后续依次为 Home、Focus、
-Controls、Devices、Activity、Moments、Appearance、Kaboo 和 Claude。
-默认关闭自动翻页与页内演示。
+上图为最初八场景版本的截图。当前应用从 Home 启动，后续按展示顺序显示已启用页面，
+最后为 Settings。Home 与 Settings 始终可用，其余十个内容页可以隐藏。默认关闭自动
+翻页与页内演示。
 
 | 按键 | 浏览模式 | 页内操作 |
 | --- | --- | --- |
@@ -35,7 +35,15 @@ Controls、Devices、Activity、Moments、Appearance、Kaboo 和 Claude。
 Kaboo 支持前后翻卡，在页内操作时暂停每八秒一次的轮播。其卡片显示 token 用量与
 费用，Claude 显示已用配额与重置时间，两页均显示采样新鲜度。展示动作与示例设备
 状态标记为 Demo，不会实际分享内容、连接设备或让开发板休眠。Controls 调节真实
-亮度与音量，电量每分钟刷新一次。
+亮度与音量，电量每分钟刷新一次。Home 中间卡片用电量圆环显示实时百分比、当前本地
+时间和日期/星期。时钟会使用 BLE payload 中的电脑时间，也会在存在已保存 Wi-Fi
+凭证时从 `ntp1.aliyun.com` 同步；离线时从最近一次保存的时间继续计时。
+
+Settings 控制哪些内容页参与翻页。短按或长按 OK 进入页内操作，UP/DOWN 在十个
+复选框之间选择（每屏四行），OK 切换显示/隐藏。Home 始终开启，Settings 不能隐藏，
+长按 OK 返回浏览。改动立即生效，
+关机前请等待 "Saved on device"。Settings 自身始终保留，即使隐藏全部内容页也
+不会失去入口。存储失败显示 "Not saved (session only)"，本次运行的设置仍然有效。
 
 ## 主要能力
 

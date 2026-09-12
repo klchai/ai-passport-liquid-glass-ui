@@ -6,6 +6,23 @@
 
 ## Unreleased
 
+- Home's hero now uses a battery ring with a live percentage, current local
+  time, and date/weekday. Computer payloads synchronize the clock immediately;
+  SNTP polls `ntp1.aliyun.com` when a network interface is available, persists
+  the last good timestamp, and keeps the clock advancing while offline. The
+  footer shortens Appearance to `Appear.` when its neighbour slot is too narrow.
+
+- Home is now the fixed default landing page and cannot be hidden. Settings is
+  also unhideable, so restoring optional pages always remains possible. Older
+  saved masks are normalized to keep Home visible before navigation starts.
+
+- Added Settings after Claude to choose which of the ten content pages appear
+  in navigation. Four rows at a time retain the glass focus and checkbox style;
+  UP/DOWN select and OK toggles in scene mode. Changes apply immediately and
+  save in the background, surviving restart. Settings is always reachable,
+  including when every content page is hidden. Startup and navigation use only
+  enabled pages, and bounded footer labels accommodate new neighbour pairs.
+  Storage failure is shown explicitly while changes remain usable in memory.
 - Polished all ten dashboard pages without replacing the glass layout. Mode
   entry/exit hints explain long OK without crowding long page titles. Controls
   show brightness percentages and audio availability; Activity uses consistent
