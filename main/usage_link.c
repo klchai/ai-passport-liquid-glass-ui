@@ -190,7 +190,11 @@ static int on_chr_write(struct ble_gatt_access_ctxt *ctxt)
 
     // 解码与校验在锁外的局部变量上完成，临界区只做整体赋值。
     usage_snapshot_t decoded;
-    time_t trusted_now = time(NULL);
+    // 只有本次开机真正同步过，系统时钟才够格当校验基准。构建种子/NVS 恢复的
+    // 时钟可能已过期若干天，用它做基准会把唯一能纠正它的那一包判成 BAD_EPOCH，
+    // 从此再也同步不回来（连带用量数据一起停更）。未授时时传 0 走 no-trusted-base
+    // 分支，首包无条件放行；同步之后防护照旧。
+    time_t trusted_now = time_sync_clock_trusted() ? time(NULL) : (time_t)-1;
     uint32_t reference_unix = 0;
     if (trusted_now >= 0) {
         uint64_t trusted_now_u = (uint64_t)trusted_now;

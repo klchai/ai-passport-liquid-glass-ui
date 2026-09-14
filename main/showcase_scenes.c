@@ -1415,10 +1415,13 @@ static void navigation_clock_refresh(void)
 {
     if (!s_navigation.state_label || !s_navigation.value_label) return;
 
-    time_sync_wall_clock_t now;
+    // 零初始化：未同步时 time_sync_get_wall_clock 不写 now，而下面仍会把
+    // now.hour 交给 ui_dashboard_greeting（它在 synced=false 时忽略该值）。
+    time_sync_wall_clock_t now = { 0 };
     char time_text[8];
     char date_text[24];
-    if (time_sync_get_wall_clock(&now)) {
+    bool synced = time_sync_get_wall_clock(&now);
+    if (synced) {
         static const char *const weekdays[] = {
             "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat",
         };
@@ -1439,6 +1442,23 @@ static void navigation_clock_refresh(void)
     }
     if (strcmp(lv_label_get_text(s_navigation.value_label), date_text) != 0) {
         lv_label_set_text(s_navigation.value_label, date_text);
+    }
+
+    // 每个 tick（SHOWCASE_TICK_MS）顺带刷新问候语，跨整点才会自动改口。
+    // 只在 Home 卡上：另外两张卡的标题不是问候语。
+    //
+    // content_swapped 这一关不能少：navigation_select 在动画一开始就把
+    // s_navigation_index 指向新卡，但屏幕上的内容要到 progress 过半才换。
+    // 只看 index 的话，从 Player/Link 切回 Home 的前半程会把仍在淡出的旧卡
+    // 标题当场改成问候语。
+    bool content_shows_current =
+        !s_navigation.animating || s_navigation.content_swapped;
+    if (s_navigation.title && s_navigation_index == 0 &&
+        content_shows_current) {
+        const char *greeting = ui_dashboard_greeting(now.hour, synced);
+        if (strcmp(lv_label_get_text(s_navigation.title), greeting) != 0) {
+            lv_label_set_text(s_navigation.title, greeting);
+        }
     }
 }
 
@@ -1465,8 +1485,10 @@ static void navigation_battery_refresh(void)
 
 static void navigation_content_update(uint8_t index)
 {
+    // index 0 没有固定标题：它的问候语跟随时钟，由下面的
+    // navigation_clock_refresh() 设置。
     static const char *const titles[] = {
-        "Good evening", "Midnight Current", "Passport Linked",
+        NULL, "Midnight Current", "Passport Linked",
     };
     static const char *const subtitles[] = {
         "Demo | Ready for today", "Demo | Ambient mix", "Demo | Bluetooth link",
@@ -1477,7 +1499,7 @@ static void navigation_content_update(uint8_t index)
     static const uint32_t colors[] = { 0x3B93C5, 0x5159B8, 0x167D69 };
     if (index > 2) index = 0;
 
-    lv_label_set_text(s_navigation.title, titles[index]);
+    if (titles[index]) lv_label_set_text(s_navigation.title, titles[index]);
     lv_label_set_text(s_navigation.subtitle, subtitles[index]);
     lv_obj_set_style_bg_color(s_navigation.hero,
                               lv_color_hex(colors[index]), 0);
@@ -1600,8 +1622,11 @@ static void navigation_motion_set(void *value, int32_t progress)
                            UI_GLASS_MOTION_PROGRESS_MAX), 0);
         } else {
             if (!navigation->content_swapped) {
-                navigation_content_update(navigation->target_index);
+                // 先置位再换内容：navigation_content_update 内部会调
+                // navigation_clock_refresh，而后者靠这个标志判断屏幕上的
+                // 内容是否已经是目标卡，没置位就会跳过问候语。
                 navigation->content_swapped = true;
+                navigation_content_update(navigation->target_index);
             }
             int32_t phase = (progress - 500) * UI_GLASS_MOTION_PROGRESS_MAX /
                             (UI_GLASS_MOTION_PROGRESS_MAX - 500);
@@ -1623,6 +1648,9 @@ static void navigation_motion_finish(navigation_view_t *navigation)
 {
     if (!navigation) return;
     if (!navigation->content_swapped) {
+        // 同 navigation_motion_set：先置位，让 content_update 里的
+        // clock_refresh 知道内容已经是目标卡。
+        navigation->content_swapped = true;
         navigation_content_update(navigation->target_index);
     }
     navigation->animating = false;

@@ -12,6 +12,12 @@ void time_sync_init(void);
 // from the BLE host and persists a recent timestamp for the next boot.
 void time_sync_poll(void);
 
+// True once this boot has taken a real synchronization (computer payload or
+// NTP). The build-time seed and the NVS-restored clock both leave it false:
+// they keep the display sane while offline, but they may be arbitrarily stale,
+// so they must not be used as a trust anchor when validating a host payload.
+bool time_sync_clock_trusted(void);
+
 // Non-blocking offer used by the NimBLE write callback. The application task
 // performs settimeofday/NVS work on its next poll.
 void time_sync_offer_computer(uint32_t unix_time, int16_t tz_offset_minutes);

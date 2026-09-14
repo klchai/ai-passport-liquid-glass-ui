@@ -9,6 +9,15 @@ uint8_t ui_dashboard_card_next(uint8_t index, uint8_t count, int8_t direction)
                          : (uint8_t)((index + 1u) % count);
 }
 
+const char *ui_dashboard_greeting(int hour, bool synced)
+{
+    if (!synced || hour < 0 || hour > 23) return "Hello";
+    if (hour < 5) return "Good evening";        // 00:00-04:59 仍算夜里
+    if (hour < 12) return "Good morning";
+    if (hour < 18) return "Good afternoon";
+    return "Good evening";
+}
+
 bool ui_dashboard_card_tick(uint32_t delta_ms, bool paused,
                             uint32_t period_ms, uint32_t *elapsed_ms,
                             uint32_t *hold_ms)

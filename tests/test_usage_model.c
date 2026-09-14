@@ -156,6 +156,36 @@ static void test_rejects_bad_input(void)
     assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) == USAGE_DECODE_BAD_EPOCH);
 }
 
+// 记录解码器在"基准时钟可信 / 不可信"两种输入下的契约，usage_link 正是靠它
+// 才能从落后的时钟里恢复：未同步时传 0，让唯一能纠正时钟的那一包落地。
+//
+// 注意这里锁不住调用方：本测试直接调 usage_model_decode，不经过 on_chr_write。
+// 若有人把 usage_link.c 里的 time_sync_clock_trusted() 门去掉、改回无条件
+// time(NULL)，下面的断言不会有任何变化，永久失同步的 bug 会悄悄回来。
+// usage_link 依赖 NimBLE 与系统时钟，目前没有宿主机替身可测。
+static void test_stale_clock_recovery(void)
+{
+    uint8_t wire[USAGE_WIRE_SIZE];
+    usage_snapshot_t s;
+
+    // 固件构建于 9 天前并在今天刷机：Mac 推来的"现在"比设备自以为的"现在"晚 9 天。
+    const uint32_t stale_reference = GEN_UNIX - 9u * 86400u;
+    build_valid(wire);
+    assert(usage_model_decode(wire, sizeof wire, 0, stale_reference, &s) ==
+           USAGE_DECODE_BAD_EPOCH);
+
+    // 同一包在"尚无可信基准"下必须被接受，否则时钟再也回不来。
+    build_valid(wire);
+    assert(usage_model_decode(wire, sizeof wire, 0, 0u, &s) == USAGE_DECODE_OK);
+    assert(s.generated_unix == GEN_UNIX);
+
+    // 一旦真正同步过，对离谱未来值的防护仍然有效。
+    build_valid(wire);
+    put_le32(wire + 2, GEN_UNIX + USAGE_EPOCH_SKEW_MAX + 1u);
+    assert(usage_model_decode(wire, sizeof wire, 0, GEN_UNIX, &s) ==
+           USAGE_DECODE_BAD_EPOCH);
+}
+
 static void test_top_model_boundary(void)
 {
     uint8_t wire[USAGE_WIRE_SIZE];
@@ -364,6 +394,7 @@ int main(void)
 {
     test_golden_vector();
     test_rejects_bad_input();
+    test_stale_clock_recovery();
     test_top_model_boundary();
     test_single_claude_window();
     test_clock();

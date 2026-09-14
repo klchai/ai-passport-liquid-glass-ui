@@ -25,6 +25,9 @@
 static atomic_bool s_initialized;
 static atomic_bool s_computer_pending;
 static atomic_bool s_ntp_pending;
+// 只有 BLE/NTP 真正授时才置位。构建时间种子与 NVS 恢复都不算：两者都可能
+// 已经过期，被当成可信基准会让 usage_model_decode 拒掉唯一能纠正它的那一包。
+static atomic_bool s_clock_trusted;
 static atomic_uint_fast32_t s_computer_unix;
 static atomic_int s_computer_tz;
 static atomic_int s_tz_offset_minutes;
@@ -118,6 +121,7 @@ static void sntp_time_synced(struct timeval *tv)
     // to the application task so the lwIP/SNTP callback stays non-blocking.
     if (tv && tv->tv_sec >= (time_t)TIME_SYNC_MIN_UNIX) {
         atomic_store(&s_ntp_pending, true);
+        atomic_store(&s_clock_trusted, true);
     }
 }
 
@@ -181,6 +185,7 @@ void time_sync_init(void)
 
     atomic_store(&s_computer_pending, false);
     atomic_store(&s_ntp_pending, false);
+    atomic_store(&s_clock_trusted, false);
     atomic_store(&s_tz_offset_minutes, TIME_SYNC_DEFAULT_TZ_MINUTES);
     s_last_save_us = esp_timer_get_time();
 
@@ -234,6 +239,11 @@ void time_sync_init(void)
     s_sntp_started = true;
 }
 
+bool time_sync_clock_trusted(void)
+{
+    return atomic_load(&s_clock_trusted);
+}
+
 void time_sync_offer_computer(uint32_t unix_time, int16_t tz_offset_minutes)
 {
     if (!plausible_unix(unix_time) ||
@@ -255,6 +265,7 @@ void time_sync_poll(void)
         int tz = atomic_load(&s_computer_tz);
         atomic_store(&s_tz_offset_minutes, tz);
         set_system_time(unix_time);
+        atomic_store(&s_clock_trusted, true);
         force_save = true;
     }
 

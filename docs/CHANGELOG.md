@@ -6,6 +6,18 @@
 
 ## Unreleased
 
+- Fixed a clock sync that could never recover. A device whose clock was more
+  than a day behind rejected the very payload carrying the correct time, and
+  kept rejecting every one after it, freezing the dashboard with a wrong clock
+  and stale Kaboo/Claude figures. Firmware built a week before it is flashed hit
+  this on first connection, as did any device powered off across a weekend. The
+  receiver clock now counts as a trust anchor only after this boot has really
+  synchronized, so the first payload always lands.
+
+- Home's greeting follows the clock instead of always reading "Good evening",
+  and turns over on the hour. Before the first synchronization it reads "Hello"
+  rather than asserting a time of day the device does not know.
+
 - Hardened BLE time updates by bounding generated timestamps against the
   receiver clock, separating one-day sample skew from the seven-day quota-reset
   horizon, and making connection status fields atomic. Wi-Fi now retries after
