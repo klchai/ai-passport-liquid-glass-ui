@@ -67,6 +67,18 @@ static void animate_thumb(lv_obj_t *thumb, int32_t target_x,
     lv_anim_start(&glint);
 }
 
+// Pulls only the specular sweep out of a thumb started by an animated setter;
+// the position slide keeps running. The scene layer owns the quality runtime
+// and calls this under the Economy tier, whose profile disables glint while
+// Full and Balanced keep it.
+void ui_glass_component_thumb_hide_glint(ui_glass_component_t *component)
+{
+    if (!component || !component->auxiliary) return;
+    lv_anim_delete(component->auxiliary, glint_set);
+    ui_glass_surface_set_glint(component->auxiliary,
+                               UI_GLASS_GLINT_HIDDEN);
+}
+
 lv_obj_t *ui_glass_content_panel_create(lv_obj_t *parent,
                                         int x, int y, int width, int height,
                                         const ui_glass_theme_t *theme)
@@ -97,9 +109,11 @@ lv_obj_t *ui_glass_focus_lens_create(lv_obj_t *parent,
                                      const ui_glass_theme_t *theme)
 {
     if (!theme) theme = ui_glass_theme_get(UI_GLASS_MODE_STANDARD);
+    // Build straight from the control material: apply_theme() overwrites the
+    // material on the next line anyway, so a CLEAR seed never reaches a draw.
     lv_obj_t *lens = ui_glass_surface_create(
         parent, x, y, width, height, UI_GLASS_RADIUS_CONTROL,
-        theme->accent, 38, UI_GLASS_MATERIAL_CLEAR);
+        theme->accent, 38, theme->control_material);
     ui_glass_focus_lens_apply_theme(lens, theme);
     return lens;
 }
@@ -147,6 +161,17 @@ ui_glass_component_t ui_glass_row_create(lv_obj_t *parent,
     return component;
 }
 
+// Movable thumbs (the toggle knob and the slider thumb) are the same semantic
+// role at two sizes, so both share one edge recipe: 8/9 of the focus rim.
+// Standard/Reduced motion 126 -> 112, High contrast 148 -> 131, Reduce
+// transparency 136 -> 120. The old code hard-coded CLEAR with 112 on the
+// knob and 124 on the slider, giving the same role two rim strengths and
+// denying High Contrast / Reduce Transparency their CONTRAST edge archive.
+static uint8_t thumb_edge_strength(const ui_glass_theme_t *theme)
+{
+    return (uint8_t)(theme->focus_edge_strength * 8u / 9u);
+}
+
 ui_glass_component_t ui_glass_toggle_create(
     lv_obj_t *parent, int x, int y, int width, int height,
     const char *label, bool enabled, const ui_glass_theme_t *theme)
@@ -159,8 +184,9 @@ ui_glass_component_t ui_glass_toggle_create(
     lv_obj_set_style_radius(component.indicator, LV_RADIUS_CIRCLE, 0);
     component.auxiliary = ui_glass_surface_create(
         component.indicator, 2, 2, 20, 20, LV_RADIUS_CIRCLE,
-        theme->text, LV_OPA_90, UI_GLASS_MATERIAL_CLEAR);
-    ui_glass_surface_set_edge_strength(component.auxiliary, 112);
+        theme->text, LV_OPA_90, theme->control_material);
+    ui_glass_surface_set_edge_strength(component.auxiliary,
+                                       thumb_edge_strength(theme));
     ui_glass_toggle_set(&component, enabled, theme);
     return component;
 }
@@ -199,8 +225,9 @@ ui_glass_component_t ui_glass_slider_create(
     lv_obj_set_style_bg_opa(component.indicator, LV_OPA_30, 0);
     component.auxiliary = ui_glass_surface_create(
         component.indicator, 0, -4, 14, 14, LV_RADIUS_CIRCLE,
-        theme->accent, LV_OPA_90, UI_GLASS_MATERIAL_CLEAR);
-    ui_glass_surface_set_edge_strength(component.auxiliary, 124);
+        theme->accent, LV_OPA_90, theme->control_material);
+    ui_glass_surface_set_edge_strength(component.auxiliary,
+                                       thumb_edge_strength(theme));
     // ui_glass_slider_set() derives the thumb position from the track's
     // measured width, and LVGL only applies the size set above on its next
     // layout pass. Without this the create-time call measures zero and pins

@@ -263,6 +263,14 @@ static int16_t s_focus_y[SHOWCASE_MAX_FOCUS];
 static int16_t s_focus_h[SHOWCASE_MAX_FOCUS];
 static uint8_t s_focus_count;
 
+// 页内焦点钩子：focus_refresh_states() 全页共用、不感知按钮样式，个别页面
+// （Moments）需要在焦点行变化时联动页内专属的光学处理。
+typedef void (*focus_page_hook_t)(uint8_t index);
+static focus_page_hook_t s_focus_page_hook;
+// Moments 的 Share 玻璃钮建面时的原始光学边强度：获焦临时置 0、离焦按值恢复，
+// 不能写常量（REGULAR 为 86，HC/RT 的 CONTRAST 为 76）。
+static uint8_t s_moments_share_edge;
+
 static uint8_t s_segment_index;
 static bool s_control_toggle = true;
 static bool s_selection_check = true;
@@ -419,6 +427,15 @@ static void reference_glass_apply(lv_obj_t *surface, uint32_t base_tint,
     // Low fill opacity needs a stronger optical rim to read as a material
     // boundary instead of a washed-out rectangle. The optics profile keeps
     // the highlight local, so this does not restore the old double white rule.
+    // T5 已定案（候选①，保留）：78 + depth*8 的顶端（depth=4）= 110，高于材质
+    // 档案最高种子 CLEAR 102，但档案 edge_strength 只是建面种子、不是天花板。
+    // 本机无模糊核，景深的主要可感知通道就是这条边：110 时 REGULAR 外环不透明
+    // 度 92、顶高光 97；钳到 102 则降到 85/90，且与 depth=3 完全同值，最高一档
+    // 景深（Player 整块展开玻璃、Controls 景深步进器拨满）在边上直接丢级。
+    // 110 也并未出族：出货 UI 里 toggle/slider 拇指 = focus*8/9 = 112（外环 94）、
+    // focus 透镜 126/148/136（外环 105 起），110 恰好夹在 CLEAR 种子 102 与拇指
+    // 112 之间。另两个调用点不受影响：Home dock 固定 depth=1（86 = REGULAR
+    // 标称），Controls 合并底板跟随步进器 0..4 本就需要完整五档。
     ui_glass_surface_set_edge_strength(surface, 78 + depth * 8);
 }
 
@@ -436,6 +453,12 @@ static lv_obj_t *reference_glass_create(lv_obj_t *parent,
         parent, x, y, width, height, radius, tint, opacity,
         UI_GLASS_MATERIAL_REGULAR);
     reference_glass_apply(surface, tint, opacity, depth);
+    // All three callers (Controls merged panel, Home dock, Player morph face)
+    // live on the control plane, so High Contrast / Reduce Transparency must
+    // swap in the CONTRAST archive (rings 60/20/6, specular 64, narrower
+    // glint) instead of staying REGULAR. The depth rim written above still
+    // owns edge_strength; this only selects the ring/specular profile.
+    ui_glass_surface_set_material(surface, t->control_material);
     if (base_tint) *base_tint = tint;
     return surface;
 }
@@ -501,6 +524,7 @@ static void stop_scene_activity(void)
     memset(&s_claude_view, 0, sizeof(s_claude_view));
     s_focus_lens = NULL;
     s_focus_count = 0;
+    s_focus_page_hook = NULL;
     s_player_state_label = NULL;
     s_player_demo_label = NULL;
     s_moments_result_label = NULL;
@@ -519,6 +543,7 @@ static void focus_refresh_states(void)
                                : UI_GLASS_COMPONENT_DEFAULT,
             theme());
     }
+    if (s_focus_page_hook) s_focus_page_hook(s_focus.index);
 }
 
 static void focus_bind(lv_obj_t *lens, uint8_t count, uint8_t initial)
@@ -720,6 +745,17 @@ static void adjustments_audio_refresh(void)
                         status == AUDIO_READY ? LV_OPA_COVER : LV_OPA_30, 0);
 }
 
+// Economy 档的质量契约是「保位移、关扫光」（ui_glass_quality_profile 的
+// glint_enabled：Full/Balanced 开、Economy 关）。widgets 不持有 runtime，
+// 由场景层在 toggle / slider 两个触发点裁决：位移动画照常启动，随后撤掉
+// 拇指上的 glint 动画并隐藏。REDUCED_MOTION 已由 duration=0 隐式关 glint。
+static void thumb_cancel_glint_if_disabled(ui_glass_component_t *component)
+{
+    if (!ui_glass_quality_profile(s_runtime.quality.level)->glint_enabled) {
+        ui_glass_component_thumb_hide_glint(component);
+    }
+}
+
 static void adjustment_change(int8_t direction)
 {
     if (s_focus.index == 0) {
@@ -730,6 +766,7 @@ static void adjustment_change(int8_t direction)
         ui_glass_slider_set_animated(
             &s_focus_components[0], s_control_slider, theme(),
             ui_glass_motion_duration(s_runtime.mode, UI_GLASS_MOTION_FOCUS));
+        thumb_cancel_glint_if_disabled(&s_focus_components[0]);
     } else if (s_focus.index == 1) {
         uint8_t next = adjustment_clamp_step(
             s_stepper_value, direction, SHOWCASE_DEPTH_MIN,
@@ -834,12 +871,15 @@ static ui_glass_component_t showcase_segmented_create(
     // "两重边框"。底板留半透明填充作凹槽，光学边只由选中的 indicator 承担。
     ui_glass_surface_set_edge_strength(platter, 0);
     component.auxiliary = platter;
+    // 选中块跟随主题的 control_material / 光学边强度：高对比与降透明模式下
+    // 凹槽底板已切 CONTRAST，选中块不能仍停在 REGULAR + 70% accent。
     component.indicator = ui_glass_surface_create(
         platter, UI_GLASS_OPTIC_RING_COUNT + s_segment_index * 59,
         UI_GLASS_OPTIC_RING_COUNT, 58,
         38 - UI_GLASS_OPTIC_RING_COUNT * 2, UI_GLASS_RADIUS_CONTROL,
-        t->accent, LV_OPA_70, UI_GLASS_MATERIAL_REGULAR);
-    ui_glass_surface_set_edge_strength(component.indicator, 124);
+        t->accent, accessible_opacity(LV_OPA_70), t->control_material);
+    ui_glass_surface_set_edge_strength(component.indicator,
+                                       t->focus_edge_strength);
     for (uint8_t i = 0; i < 3; ++i) {
         lv_obj_t *label = text_at(platter, labels[i], 4 + i * 59, 10,
                                   &lv_font_montserrat_14,
@@ -983,8 +1023,12 @@ static ui_glass_component_t showcase_stepper_create(
         component.root, 108, 7, 30, 30, UI_GLASS_RADIUS_CONTROL,
         t->control_tint,
         t->control_opacity, t->control_material);
+    // 加号放在 root x155（stage 161..190）而不是对称的 160：Controls 透镜
+    // 收到 x13/w182 后右三环在 stage 列 192/193/194，加号外三环落在
+    // 188/189/190，还空出 col 191；旧 x160（stage 右缘 195）会越出新透镜。
+    // 数值恒为 0..4 一位数，root x143 起约 8px（143..150），两侧各空 4-5 列。
     lv_obj_t *plus = ui_glass_surface_create(
-        component.root, 160, 7, 30, 30, UI_GLASS_RADIUS_CONTROL,
+        component.root, 155, 7, 30, 30, UI_GLASS_RADIUS_CONTROL,
         t->control_tint,
         t->control_opacity, t->control_material);
     centered_label(minus, "-", &lv_font_montserrat_14, t->text);
@@ -1021,6 +1065,18 @@ static ui_glass_component_t showcase_progress_create(
     return component;
 }
 
+// Moments 页内焦点钩子。Share（页内 index 1）是本页唯一的玻璃按钮，它与焦点
+// 透镜同为 r14、间距仅 1-2px，两组三层 1px 光学环会贴成"双线"。Share 获焦时
+// 关掉它自身的光学边、由透镜独自承担（同 Focus segmented 底板的解法），离焦
+// 按建面时存下的原值恢复。上下两行是实色按钮，没有光学边，无须处理。
+static void moments_focus_edge_hook(uint8_t index)
+{
+    lv_obj_t *share = s_focus_components[1].indicator;
+    if (!share) return;
+    ui_glass_surface_set_edge_strength(
+        share, index == 1 ? 0 : s_moments_share_edge);
+}
+
 static void build_buttons(lv_obj_t *root)
 {
     const ui_glass_theme_t *t = theme();
@@ -1040,18 +1096,35 @@ static void build_buttons(lv_obj_t *root)
     lv_label_set_long_mode(s_moments_result_label, LV_LABEL_LONG_DOT);
     lv_obj_set_height(s_moments_result_label, lv_font_montserrat_14.line_height);
 
-    // Follow the action capsule's actual 184 px geometry with only a two-pixel
-    // focus halo. The previous 196 px lens produced a visibly nested pill.
-    lv_obj_t *lens = ui_glass_focus_lens_create(stage, 10, 79, 188, 42, t);
+    // 透镜与每行 root 同高（h40）、行距 41：面在 root 内 y+1..y+38，透镜
+    // y..y+39，上下各 1px halo，三行严格对称。透镜仍是 x10/w188，比 184px
+    // 胶囊左右各多 2px halo；更宽的 196px 透镜会露出嵌套药丸。
+    // 关键是纵向不能与 Share（第 1 行，唯一玻璃面）共扫描行。Share 面在
+    // stage 行 121..158，三组光学环占 121/122/123 与 156/157/158：
+    //  - 透镜停第 0 行（79..118）底三环 116/117/118，与 Share 顶环空
+    //    119/120 两行；
+    //  - 透镜停第 2 行（161..200）顶三环 161/162/163，与 Share 底环空
+    //    159/160 两行。
+    // 旧几何行距 40、透镜 h42 时停第 0 行的底外环正好落在 Share 顶外环
+    // （同 120 行），相邻行读成双线。透镜正压 Share（停第 1 行）时仍由
+    // moments_focus_edge_hook 关掉 Share 自己的边，不靠几何避让。
+    // 边界：顶外环行 79 离 art 卡底行 75 空 3 行；底外环行 200 离 204 高的
+    // stage 底边空 3 行，第 2 行的面（底 199）与透镜都不溢出。
+    lv_obj_t *lens = ui_glass_focus_lens_create(stage, 10, 79, 188, 40, t);
     static const char *const labels[] = {
         "Open moment", "Share", "Remove", NULL,
     };
     for (uint8_t i = 0; i < 3; ++i) {
-        s_focus_y[i] = 79 + i * 40;
-        s_focus_h[i] = 42;
+        s_focus_y[i] = 79 + i * 41;
+        s_focus_h[i] = 40;
         s_focus_components[i] = showcase_button_create(
             stage, s_focus_y[i], labels[i], i, t);
     }
+    // 记下 Share 玻璃面建面时的 edge_strength（随 control_material 变化），
+    // 供页内焦点钩子离焦恢复。
+    s_moments_share_edge =
+        ui_glass_surface_get_edge_strength(s_focus_components[1].indicator);
+    s_focus_page_hook = moments_focus_edge_hook;
     focus_bind(lens, 3, 0);
 }
 
@@ -1101,14 +1174,22 @@ static void build_adjustments(lv_obj_t *root)
         stage, 6, 4, 196, 164, UI_GLASS_RADIUS_PANEL, group_opacity,
         s_stepper_value, t, &s_adjustment_tints[0]);
     content_divider_create(stage, 58, t);
-    content_divider_create(stage, 114, t);
-    lv_obj_t *lens = ui_glass_focus_lens_create(stage, 6, 8, 196, 44, t);
-    s_focus_y[0] = 8;
-    s_focus_y[1] = 64;
+    content_divider_create(stage, 113, t);
+    // 透镜相对合并底板四向内缩：两者都画三层 1px 光学环，环列重合会逐像素
+    // 贴成"双线"。底板三环列 6/7/8 与 199/200/201，透镜 x13/w182 的三环列
+    // 13/14/15 与 192/193/194，左右各空 4 列（9..12、195..198）。步进器加号
+    // 已先左移到 stage 161..190，最宽可见内容（加号外环 190、滑块拇指 100%
+    // 时外环 189、进度轨道 187）都在透镜内。
+    // 三停留位 y10/65/120、h42：滑块拇指底三环行 44/45/46 与透镜底内环行 49
+    // 之间空 47/48 两行；首尾停留位离底板上下三环仍各 3 空行（7..9、162..164）。
+    // 行距 55，相邻停留位之间空 13 行，发丝线落在 58、113 正中。
+    lv_obj_t *lens = ui_glass_focus_lens_create(stage, 13, 10, 182, 42, t);
+    s_focus_y[0] = 10;
+    s_focus_y[1] = 65;
     s_focus_y[2] = 120;
-    s_focus_h[0] = 44;
-    s_focus_h[1] = 44;
-    s_focus_h[2] = 44;
+    s_focus_h[0] = 42;
+    s_focus_h[1] = 42;
+    s_focus_h[2] = 42;
     s_focus_components[0] = ui_glass_slider_create(
         stage, 6, 8, 196, 44, "Brightness", s_control_slider, t);
     s_focus_components[1] = showcase_stepper_create(stage, 64, t);
@@ -1129,11 +1210,14 @@ static void build_lists(lv_obj_t *root)
     const ui_glass_theme_t *t = theme();
     lv_obj_t *stage = showcase_content_stage_create(root, t);
     lv_obj_t *lens = ui_glass_focus_lens_create(stage, 6, 10, 196, 42, t);
+    // 行距 48（原 47）：相邻透镜边之间有 6 个空扫描行，发丝线落在间隙正中
+    // （1px 线无法对偶数间隙严格中分，按 build_selection 约定向上取整），
+    // 与上、下两条外环分别隔 3、2 个空扫描行；原 47 行距时只有 1、3。
     content_divider_create(stage, 55, t);
-    content_divider_create(stage, 102, t);
-    content_divider_create(stage, 149, t);
+    content_divider_create(stage, 103, t);
+    content_divider_create(stage, 151, t);
     for (uint8_t i = 0; i < 4; ++i) {
-        s_focus_y[i] = 10 + i * 47;
+        s_focus_y[i] = 10 + i * 48;
         s_focus_h[i] = 42;
         s_focus_components[i] = ui_glass_row_create(
             stage, 6, s_focus_y[i], 196, 42, labels[i], values[i], t);
@@ -1282,6 +1366,17 @@ static void morph_finish(morph_view_t *morph)
     morph->animating = false;
     morph_set(morph, UI_GLASS_MOTION_PROGRESS_MAX);
     if (morph->surface) {
+        // T4 已定案（候选②）：base_tint 只在建面时按折叠态中心借一次壁纸色，
+        // 展开后中心从绝对 y≈80 移到 y≈151 也不重借——同一块玻璃在 morph 全程
+        // 携带同一材质身份，静止瞬间填充不能"跳"一下。实测两锚点借色虽差到
+        // B 通道 21（0x011B53→0x011B3E），但借色只占 tint 的 91/255≈36%，传到
+        // depth=4 的最终 fill 后 8-bit 差 ≤5；四套主题全部量化成同一个 RGB565
+        // 字（Standard/ReducedMotion 0x435A75、HighContrast 0x2C435E、
+        // ReduceTransp 0x273E57），即以 150 opa 叠到壁纸上的可见像素也逐位相同。
+        // 重借（候选①）要么在 morph_finish 产生一次整面 fill 跳变，要么得在
+        // morph_set 的 depth 分档里加交叉混合，二者都是零收益复杂度。随位置走
+        // 的视觉由边承担：三层环与高光段每帧按实时 bounds 重采壁纸
+        // （surface_draw 的 top/bottom_sample）。
         reference_glass_apply(morph->surface, morph->base_tint,
                               morph->to.opacity, morph->visual_depth);
         ui_glass_surface_set_glint(morph->surface, UI_GLASS_GLINT_HIDDEN);
@@ -1505,12 +1600,25 @@ static void navigation_content_update(uint8_t index)
                               lv_color_hex(colors[index]), 0);
     lv_label_set_text(s_navigation.status_icon, symbols[index]);
     if (index == 0) {
+        // 时间是这张卡的主信息，用与问候语同级的 montserrat_20。另两张卡的
+        // state_label 是 "PROGRESS"/"SIGNAL" 这类说明文字，跟着放大会盖过它
+        // 下面的数值，所以字号连同纵向位置都按卡片分别设置。
+        // 20px 行高 22 + 6px 间隙 + 14px 行高 16 = 44，块中心落在 42，
+        // 与电量环（hero 内 14..70）的中心一致。
+        lv_obj_set_style_text_font(s_navigation.state_label,
+                                   &lv_font_montserrat_20, 0);
+        lv_obj_set_y(s_navigation.state_label, 20);
+        lv_obj_set_y(s_navigation.value_label, 48);
         lv_obj_add_flag(s_navigation.status_icon, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_navigation.battery_ring, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(s_navigation.battery_percent, LV_OBJ_FLAG_HIDDEN);
         navigation_clock_refresh();
         navigation_battery_refresh();
     } else {
+        lv_obj_set_style_text_font(s_navigation.state_label,
+                                   &lv_font_montserrat_14, 0);
+        lv_obj_set_y(s_navigation.state_label, 22);
+        lv_obj_set_y(s_navigation.value_label, 46);
         lv_obj_clear_flag(s_navigation.status_icon, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_navigation.battery_ring, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_navigation.battery_percent, LV_OBJ_FLAG_HIDDEN);
@@ -1535,7 +1643,8 @@ static void navigation_content_create(lv_obj_t *panel,
                                     &lv_font_montserrat_14, t->text_muted);
 
     // hero 与上方标题卡同宽同圆角，也与 dock / footer 对齐（绝对 14..226）。
-    // 高度 76 让它与 dock 之间留出 10px，而不是原来贴着的 2px。
+    // 高度 76：hero 在 panel（root y=6）内底边为 rel 152，即 root y=158；
+    // dock 上移后顶边 root y=164，两者实色卡与玻璃面间隔 6px。
     s_navigation.hero = solid_object(s_navigation.content, 0, 76, 212, 76,
                                      UI_GLASS_RADIUS_PANEL, 0x3B93C5,
                                      LV_OPA_COVER);
@@ -1711,19 +1820,27 @@ static void build_navigation(lv_obj_t *root)
     // Dock 与常驻导航条同宽（x=14, w=212）同圆角（FLOATING=22）：两块浮动玻璃
     // 上下相邻，宽度或圆角不一致会在两者之间读出一道台阶。
     // 三个 tab 各 64 宽，居中留边 (212-192)/2 = 10。
+    // dock 底边与 footer 顶边必须留 8 个空扫描行：两者同宽同 r22，各画三层
+    // 1px 同心光学环，间隙只有 4px 时两簇三环会贴成"双线"（本页选中滑块
+    // 7-8px 间距是双轨消失的实测基准）。footer 是全局 shell（y=272），所以
+    // 间隙由本页的 dock 几何承担：rel y=164 + 场景偏移 44 = 绝对 208..263，
+    // 距 footer 顶边 272 恰好 8px。
     s_navigation.dock_shadow = solid_object(
-        root, 16, 170, 208, 52, UI_GLASS_RADIUS_FLOATING,
+        root, 16, 166, 208, 52, UI_GLASS_RADIUS_FLOATING,
         0x01070D, 44);
     s_navigation.dock = reference_glass_create(
-        root, 14, 168, 212, 56, UI_GLASS_RADIUS_FLOATING, 144, 1, t, NULL);
+        root, 14, 164, 212, 56, UI_GLASS_RADIUS_FLOATING, 144, 1, t, NULL);
     s_navigation.selection_shadow = solid_object(
         s_navigation.dock, 12 + s_navigation_index * 64, 10, 60, 36,
         UI_GLASS_RADIUS_CONTROL, 0x01070D, 28);
+    // 选中滑块与 Focus segmented 同构：材质 / 填充 / 光学边全部跟随主题，
+    // 高对比与降透明模式下不再停在 REGULAR + 70% accent。
     s_navigation.selection = ui_glass_surface_create(
         s_navigation.dock, 10 + s_navigation_index * 64, 8, 64, 40,
-        UI_GLASS_RADIUS_CONTROL, t->accent, LV_OPA_70,
-        UI_GLASS_MATERIAL_REGULAR);
-    ui_glass_surface_set_edge_strength(s_navigation.selection, 124);
+        UI_GLASS_RADIUS_CONTROL, t->accent, accessible_opacity(LV_OPA_70),
+        t->control_material);
+    ui_glass_surface_set_edge_strength(s_navigation.selection,
+                                       t->focus_edge_strength);
     for (uint8_t i = 0; i < 3; ++i) {
         s_navigation.tab_items[i] = text_at(
             s_navigation.dock, tabs[i], 10 + i * 64, 13,
@@ -1816,7 +1933,24 @@ static void build_feedback(lv_obj_t *root)
 
     s_feedback.progress = showcase_progress_create(
         stage, 108, "Saved", 64, t);
+    // T3 已定案（候选②，toast 专用配方）：toast 是非交互瞬态反馈，材质与填充
+    // 仍走 platter 的 REGULAR/CONTRAST 配方（control_opacity 154/218/236），
+    // 实测四主题 14px 白字对玻璃底的像素级最低对比度为 9.60 / 13.05 / 13.63 /
+    // 9.60，全部超过 WCAG AAA 7:1，edge 只画在周边三环上、不进字形区，故降边
+    // 对可读性零影响。但 helper 给的 focus 级边（Standard 126：外环 105、内环
+    // 38/10、顶高光 111）让 toast 看起来"可按"；这里降到 CHROME 档案种子 30
+    // （REGULAR 环 25/9/2、高光 27；CONTRAST 主题 21/7/2、22），安静且无
+    // glint，与被动 chrome 语义一致。
+    // 不选候选③（真切 CHROME 材质）：它的 fill_opacity=30 把可读性完全押给深
+    // 壁纸——本页字形带实测 16.5:1 只是因为那一条壁纸恰好近黑，壁纸亮块透过后
+    // 无保证；要稳就得再加一层深色实色衬底，多一个 lv_obj 与一遍约 5.3k px
+    // 混合，换来的对比度（16.7）相对本配方的 9.6 没有实际收益，还彻底压死玻璃
+    // 透传。helper 被 footer / Kaboo 卡共用，不能改，只在此调用点覆盖。
     lv_obj_t *toast = ui_glass_platter_create(stage, 26, 158, 156, 34, t);
+    // 30 = UI_GLASS_MATERIAL_CHROME 档案的 edge_strength 种子（见
+    // ui_glass_optics_for_material），toast 是全仓唯一借用 chrome 量级边、
+    // 但保留 REGULAR 填充的面。
+    ui_glass_surface_set_edge_strength(toast, 30);
     s_feedback.toast_label = centered_label(
         toast, "", &lv_font_montserrat_14, t->text);
     feedback_refresh(false);
@@ -1830,11 +1964,12 @@ static void build_states(lv_obj_t *root)
     const ui_glass_theme_t *t = theme();
     lv_obj_t *stage = showcase_content_stage_create(root, t);
     lv_obj_t *lens = ui_glass_focus_lens_create(stage, 6, 10, 196, 42, t);
+    // 与 build_lists 同构：行距 48，分割线对称居中，透镜边不再贴着发丝线。
     content_divider_create(stage, 55, t);
-    content_divider_create(stage, 102, t);
-    content_divider_create(stage, 149, t);
+    content_divider_create(stage, 103, t);
+    content_divider_create(stage, 151, t);
     for (uint8_t i = 0; i < UI_GLASS_MODE_COUNT; ++i) {
-        s_focus_y[i] = 10 + i * 47;
+        s_focus_y[i] = 10 + i * 48;
         s_focus_h[i] = 42;
         s_focus_components[i] = ui_glass_row_create(
             stage, 6, s_focus_y[i], 196, 42, labels[i],
@@ -1873,13 +2008,16 @@ static void build_settings(lv_obj_t *root)
     uint16_t mask = dashboard_preferences_pages();
     for (uint8_t i = 0; i < count; ++i) {
         showcase_page_t page = UI_DASHBOARD_PAGE_ORDER[first + i];
-        s_focus_y[i] = 22 + i * 42;
+        // 行距 43（原 42）：原 42 使相邻透镜首尾相接，分割线只能落在上一行
+        // 透镜的底边外环扫描行上（y+41）。多出的 1px 让发丝线独占两条外环
+        // 之间的扫描行（y+42），与上下外环各相距 1px、不再与外环重合。
+        s_focus_y[i] = 22 + i * 43;
         s_focus_h[i] = 42;
         s_focus_components[i] = showcase_choice_create(
             stage, s_focus_y[i],
             page == SHOWCASE_NAVIGATION ? "Home (always on)" : PAGE_TITLES[page],
             ui_dashboard_page_visible(mask, page), false, t);
-        if (i + 1u < count) content_divider_create(stage, s_focus_y[i] + 41, t);
+        if (i + 1u < count) content_divider_create(stage, s_focus_y[i] + 42, t);
     }
     focus_bind(lens, count, s_settings_selection - first);
     s_settings_note = text_at(root, "", 28, 206,
@@ -2017,41 +2155,54 @@ static void build_kaboo(lv_obj_t *root)
     lv_obj_set_style_text_align(s_kaboo_view.note, LV_TEXT_ALIGN_CENTER, 0);
 }
 
-// 一个配额窗口 = 一块玻璃卡片：标题 + 百分比 + 进度条 + 重置提示。
-static void build_quota_card(lv_obj_t *stage, int y, const char *label,
-                             lv_obj_t **out_value, lv_obj_t **out_bar,
-                             lv_obj_t **out_reset)
+// 一个配额窗口 = 标题 + 百分比 + 进度条 + 重置提示，铺进共享玻璃卡里
+// y 起的 82px 区块（见 build_claude）。track 用 text_muted @ OPA_30 —— 与
+// 玻璃 slider 的 track 同一配方：旧黑卡上的 text @ OPA_10 压在深色实色面上，
+// 换成会透出壁纸的玻璃面后会糊掉，text_muted/30 在四套主题的玻璃面上都可辨。
+static void build_quota_row(lv_obj_t *card, int y, const char *label,
+                            lv_obj_t **out_value, lv_obj_t **out_bar,
+                            lv_obj_t **out_reset)
 {
     const ui_glass_theme_t *t = theme();
-    lv_obj_t *card = ui_glass_platter_create(stage, 12, y, 184, 82, t);
 
-    text_at(card, label, 14, 10, &lv_font_montserrat_14, t->text);
-    *out_value = text_at(card, "--", 100, 6, &lv_font_montserrat_20, t->text);
+    text_at(card, label, 14, y + 10, &lv_font_montserrat_14, t->text);
+    *out_value = text_at(card, "--", 100, y + 6, &lv_font_montserrat_20,
+                         t->text);
     lv_obj_set_width(*out_value, 70);
     lv_obj_set_style_text_align(*out_value, LV_TEXT_ALIGN_RIGHT, 0);
 
-    lv_obj_t *track = solid_object(card, 14, 40, 156, 8, LV_RADIUS_CIRCLE,
-                                   t->text, LV_OPA_10);
+    lv_obj_t *track = solid_object(card, 14, y + 40, 156, 8,
+                                   LV_RADIUS_CIRCLE, t->text_muted, LV_OPA_30);
     *out_bar = solid_object(track, 0, 0, 0, 8, LV_RADIUS_CIRCLE,
                             t->accent, LV_OPA_COVER);
 
-    *out_reset = text_at(card, "", 14, 56, &lv_font_montserrat_14,
+    *out_reset = text_at(card, "", 14, y + 56, &lv_font_montserrat_14,
                          t->text_muted);
     lv_obj_set_width(*out_reset, 156);
 }
 
-// Claude 页两个窗口同屏各占一卡，不轮换 —— 配额只有两项，一眼看全更实用。
+// Claude 页两个窗口同屏，不轮换 —— 配额只有两项，一眼看全更实用。
+// 与 Kaboo 同构：一张大玻璃卡承载两个窗口，中间一条 hairline。不叠两张玻璃
+// 卡 —— 相隔 10px 的两张卡各自的三层光学边会在沟槽里对置成两组强边；合并后
+// 本页稳态玻璃面只有这一张（外加全局 footer），与 Kaboo 完全一致。
 static void build_claude(lv_obj_t *root)
 {
     const ui_glass_theme_t *t = theme();
     lv_obj_t *stage = data_stage(root);
 
-    build_quota_card(stage, 27, "5h Used",
-                     &s_claude_view.five_value, &s_claude_view.five_bar,
-                     &s_claude_view.five_reset);
-    build_quota_card(stage, 119, "7d Used",
-                     &s_claude_view.seven_value, &s_claude_view.seven_bar,
-                     &s_claude_view.seven_reset);
+    // 卡 y27..197：区块 1 占卡内 0..81，hairline 在 87，区块 2 从 88 起，
+    // 底边留 6px，与单窗口原卡的内部留白一致。
+    lv_obj_t *card = ui_glass_platter_create(stage, 12, 27, 184, 170, t);
+
+    build_quota_row(card, 0, "5h Used",
+                    &s_claude_view.five_value, &s_claude_view.five_bar,
+                    &s_claude_view.five_reset);
+
+    solid_object(card, 14, 87, 156, 1, 0, t->text_muted, LV_OPA_20);
+
+    build_quota_row(card, 88, "7d Used",
+                    &s_claude_view.seven_value, &s_claude_view.seven_bar,
+                    &s_claude_view.seven_reset);
 
     s_claude_view.note = text_at(stage, "", 12, 4, &lv_font_montserrat_14,
                                  t->warning);
@@ -2140,7 +2291,7 @@ static void refresh_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset,
     const ui_glass_theme_t *t = theme();
 
     lv_label_set_text_fmt(value, "%u%%", pct);
-    lv_obj_set_width(bar, 156 * pct / 100);   // 轨道宽 156，与 build_quota_card 一致
+    lv_obj_set_width(bar, 156 * pct / 100);   // 轨道宽 156，与 build_quota_row 一致
 
     // 用量越高越接近告警色，让人一眼看出余量紧张。
     uint32_t color = t->accent;
@@ -2657,6 +2808,7 @@ static void focused_action(void)
                 &s_focus_components[1], s_control_toggle, theme(),
                 ui_glass_motion_duration(s_runtime.mode,
                                          UI_GLASS_MOTION_FOCUS));
+            thumb_cancel_glint_if_disabled(&s_focus_components[1]);
         } else if (s_focus.index == 2) {
             s_selection_check = !s_selection_check;
             showcase_choice_set(&s_focus_components[2], s_selection_check,

@@ -72,3 +72,8 @@ void ui_glass_slider_set_animated(ui_glass_component_t *component,
                                   uint8_t percent,
                                   const ui_glass_theme_t *theme,
                                   uint16_t duration_ms);
+
+// Cancels the in-flight glint sweep of a toggle knob or slider thumb without
+// stopping its slide. The scene layer calls it after an animated setter when
+// the active quality profile (Economy) disables glint.
+void ui_glass_component_thumb_hide_glint(ui_glass_component_t *component);

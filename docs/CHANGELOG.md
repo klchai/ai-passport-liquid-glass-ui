@@ -6,6 +6,29 @@
 
 ## Unreleased
 
+- Fixed three more liquid-glass contract issues. The Controls merged panel,
+  Home dock, and Player morph face now build from the active control material,
+  so High Contrast and Reduce Transparency get the CONTRAST ring/specular
+  archive (rings 60/20/6) instead of staying regular glass; the depth-based rim
+  strength still applies on top. The Focus toggle knob and the Controls slider
+  thumb now share one material-aware edge recipe (8/9 of the focus rim:
+  112/131/120/112 across the four modes), so the same role no longer carries
+  two hard-coded rim strengths and both honor the CONTRAST archive. Thumb glint
+  sweeps now obey the Economy quality tier's glint contract: the thumb still
+  slides, but the specular sweep is suppressed.
+
+- Fixed four liquid-glass layering and accessibility issues. The Controls
+  focus lens now sits four pixels inside the merged panel on every side, so its
+  three optical rings no longer coincide pixel-for-pixel with the panel's rim
+  and read as a double border. Focus's segmented selection and Home's dock
+  selection now follow the control material, fill opacity, and edge strength of
+  the active theme, staying opaque and high-contrast in High Contrast and
+  Reduce Transparency modes instead of remaining 70%-transparent regular glass.
+  Claude's two read-only quota cards are plain content surfaces (like Player's
+  cards) instead of interactive glass platters, removing the focus-strength rim
+  and the opposing strong edges between them; only the global footer keeps
+  glass on that page.
+
 - Fixed a clock sync that could never recover. A device whose clock was more
   than a day behind rejected the very payload carrying the correct time, and
   kept rejecting every one after it, freezing the dashboard with a wrong clock
