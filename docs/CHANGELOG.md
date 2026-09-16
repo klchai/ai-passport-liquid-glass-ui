@@ -6,6 +6,12 @@
 
 ## Unreleased
 
+- Refined page glass hierarchy: Home's hero, Activity feedback surfaces, and
+  Kaboo/Claude data cards and Kaboo's model chip now use restrained optical
+  edges. Passive chips and nested controls no longer read as flat fills or
+  competing focus outlines. Accessibility opacity is preserved for the new
+  surfaces.
+
 - Fixed three more liquid-glass contract issues. The Controls merged panel,
   Home dock, and Player morph face now build from the active control material,
   so High Contrast and Reduce Transparency get the CONTRAST ring/specular

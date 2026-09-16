@@ -1031,6 +1031,11 @@ static ui_glass_component_t showcase_stepper_create(
         component.root, 155, 7, 30, 30, UI_GLASS_RADIUS_CONTROL,
         t->control_tint,
         t->control_opacity, t->control_material);
+    // These two small controls sit inside the page focus lens. Keep their
+    // optical rims quieter than the lens so the stepper reads as one control
+    // instead of three competing glass outlines.
+    ui_glass_surface_set_edge_strength(minus, t->focus_edge_strength / 2);
+    ui_glass_surface_set_edge_strength(plus, t->focus_edge_strength / 2);
     centered_label(minus, "-", &lv_font_montserrat_14, t->text);
     centered_label(plus, "+", &lv_font_montserrat_14, t->text);
     component.value = text_at(component.root, "0", 143, 13,
@@ -1596,8 +1601,8 @@ static void navigation_content_update(uint8_t index)
 
     if (titles[index]) lv_label_set_text(s_navigation.title, titles[index]);
     lv_label_set_text(s_navigation.subtitle, subtitles[index]);
-    lv_obj_set_style_bg_color(s_navigation.hero,
-                              lv_color_hex(colors[index]), 0);
+    ui_glass_surface_set_tint(s_navigation.hero, colors[index],
+                              accessible_opacity(LV_OPA_COVER));
     lv_label_set_text(s_navigation.status_icon, symbols[index]);
     if (index == 0) {
         // 时间是这张卡的主信息，用与问候语同级的 montserrat_20。另两张卡的
@@ -1645,9 +1650,13 @@ static void navigation_content_create(lv_obj_t *panel,
     // hero 与上方标题卡同宽同圆角，也与 dock / footer 对齐（绝对 14..226）。
     // 高度 76：hero 在 panel（root y=6）内底边为 rel 152，即 root y=158；
     // dock 上移后顶边 root y=164，两者实色卡与玻璃面间隔 6px。
-    s_navigation.hero = solid_object(s_navigation.content, 0, 76, 212, 76,
-                                     UI_GLASS_RADIUS_PANEL, 0x3B93C5,
-                                     LV_OPA_COVER);
+    s_navigation.hero = ui_glass_surface_create(
+        s_navigation.content, 0, 76, 212, 76, UI_GLASS_RADIUS_PANEL,
+        0x3B93C5, accessible_opacity(LV_OPA_COVER), t->control_material);
+    // The hero is an opaque content card, but its perimeter still needs the
+    // same restrained optical cue as the surrounding floating surfaces.
+    ui_glass_surface_set_edge_strength(s_navigation.hero,
+                                       t->focus_edge_strength / 2);
     s_navigation.battery_ring = lv_arc_create(s_navigation.hero);
     lv_obj_set_pos(s_navigation.battery_ring, 14, 14);
     lv_obj_set_size(s_navigation.battery_ring, 56, 56);
@@ -1855,10 +1864,15 @@ static void build_navigation(lv_obj_t *root)
 
 static lv_obj_t *feedback_chip(lv_obj_t *parent, int x, int y, int width,
                                const char *label, uint32_t color,
-                               lv_obj_t **label_out)
+                               lv_obj_t **label_out,
+                               const ui_glass_theme_t *t)
 {
-    lv_obj_t *chip = solid_object(parent, x, y, width, 28,
-                                  LV_RADIUS_CIRCLE, color, LV_OPA_30);
+    lv_obj_t *chip = ui_glass_surface_create(
+        parent, x, y, width, 28, LV_RADIUS_CIRCLE, color,
+        accessible_opacity(LV_OPA_30), t->control_material);
+    // Status chips are passive feedback. A light rim gives them a glass
+    // identity without competing with the interactive focus lens.
+    ui_glass_surface_set_edge_strength(chip, t->focus_edge_strength / 3);
     lv_obj_t *text = centered_label(
         chip, label, &lv_font_montserrat_14, color);
     if (label_out) *label_out = text;
@@ -1891,11 +1905,12 @@ static void feedback_refresh(bool animate)
         return;
     }
 
-    lv_obj_set_style_bg_color(s_feedback.status_chip,
-                              lv_color_hex(color), 0);
+    ui_glass_surface_set_tint(s_feedback.status_chip, color,
+                              accessible_opacity(LV_OPA_30));
     lv_label_set_text(s_feedback.status_label, statuses[state]);
     set_label_color(s_feedback.status_label, color);
-    lv_obj_set_style_bg_color(s_feedback.alert, lv_color_hex(color), 0);
+    ui_glass_surface_set_tint(s_feedback.alert, color,
+                              accessible_opacity(LV_OPA_20));
     lv_label_set_text(s_feedback.alert_title, titles[state]);
     set_label_color(s_feedback.alert_title, color);
     lv_label_set_text(s_feedback.alert_detail, details[state]);
@@ -1918,13 +1933,15 @@ static void build_feedback(lv_obj_t *root)
 {
     const ui_glass_theme_t *t = theme();
     lv_obj_t *stage = showcase_content_stage_create(root, t);
-    feedback_chip(stage, 14, 10, 82, "Demo", t->text_muted, NULL);
+    feedback_chip(stage, 14, 10, 82, "Demo", t->text_muted, NULL, t);
     s_feedback.status_chip = feedback_chip(
-        stage, 108, 10, 82, "", t->accent, &s_feedback.status_label);
+        stage, 108, 10, 82, "", t->accent, &s_feedback.status_label, t);
 
-    s_feedback.alert = solid_object(stage, 14, 50, 180, 52,
-                                    UI_GLASS_RADIUS_PANEL,
-                                    t->accent, LV_OPA_20);
+    s_feedback.alert = ui_glass_surface_create(
+        stage, 14, 50, 180, 52, UI_GLASS_RADIUS_PANEL, t->accent,
+        accessible_opacity(LV_OPA_20), t->control_material);
+    ui_glass_surface_set_edge_strength(s_feedback.alert,
+                                       t->focus_edge_strength / 3);
     s_feedback.alert_title = text_at(
         s_feedback.alert, "", 14, 8, &lv_font_montserrat_14, t->accent);
     s_feedback.alert_detail = text_at(
@@ -2123,6 +2140,9 @@ static void build_kaboo(lv_obj_t *root)
 
     // 一张大玻璃卡承载当前窗口：窗口名 → 大字 token → 费用。
     lv_obj_t *card = ui_glass_platter_create(stage, 12, 28, 184, 118, t);
+    // This is read-only data, so keep the platter's glass edge below the
+    // interactive focus lens and let the numbers carry the hierarchy.
+    ui_glass_surface_set_edge_strength(card, t->focus_edge_strength / 2);
     s_kaboo_view.label = text_at(card, "", 0, 14, &lv_font_montserrat_14,
                                  t->text_muted);
     lv_obj_set_width(s_kaboo_view.label, 184);
@@ -2139,9 +2159,12 @@ static void build_kaboo(lv_obj_t *root)
 
     build_dots(stage, 156, s_kaboo_view.dots, KABOO_CARD_COUNT, t);
 
-    // 模型名做成 accent 色胶囊，像 Activity 场景的状态 chip。
-    lv_obj_t *chip = solid_object(stage, 12, 172, 184, 28, LV_RADIUS_CIRCLE,
-                                  t->accent, LV_OPA_20);
+    // 模型名是数据卡的被动标签，使用低强度玻璃边保持它与主卡材质相连，
+    // 又不会抢过大数字的层级。
+    lv_obj_t *chip = ui_glass_surface_create(
+        stage, 12, 172, 184, 28, LV_RADIUS_CIRCLE, t->accent,
+        accessible_opacity(LV_OPA_20), t->control_material);
+    ui_glass_surface_set_edge_strength(chip, t->focus_edge_strength / 3);
     s_kaboo_view.model = text_at(chip, "--", 10, 6, &lv_font_montserrat_14,
                                  t->accent);
     lv_obj_set_width(s_kaboo_view.model, 164);
@@ -2193,6 +2216,9 @@ static void build_claude(lv_obj_t *root)
     // 卡 y27..197：区块 1 占卡内 0..81，hairline 在 87，区块 2 从 88 起，
     // 底边留 6px，与单窗口原卡的内部留白一致。
     lv_obj_t *card = ui_glass_platter_create(stage, 12, 27, 184, 170, t);
+    // Both quota rows are read-only. A quieter rim preserves the shared glass
+    // surface while keeping it visually below the page focus treatment.
+    ui_glass_surface_set_edge_strength(card, t->focus_edge_strength / 2);
 
     build_quota_row(card, 0, "5h Used",
                     &s_claude_view.five_value, &s_claude_view.five_bar,
