@@ -2319,16 +2319,20 @@ static void refresh_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset,
     lv_label_set_text_fmt(value, "%u%%", pct);
     lv_obj_set_width(bar, 156 * pct / 100);   // 轨道宽 156，与 build_quota_row 一致
 
-    // 用量越高越接近告警色，让人一眼看出余量紧张。
+    // 用量越高越接近告警色，让人一眼看出余量紧张。100% 爆额是本页最需要
+    // 警示的状态，绝不能被"数据过期"洗成浅色 —— 那会让一根满额红条渲染成
+    // 几乎不可见的白条，还与"空条/无数据"混淆。过期改用降低不透明度表达：
+    // 语义色（青/黄/红）始终保留，只是变淡，配合顶部 note 已经说明的 stale。
     uint32_t color = t->accent;
     if (pct >= 90) color = t->danger;
     else if (pct >= 70) color = t->warning;
     bool expired = have_now && usage_model_quota_expired(resets_unix, now_unix);
     bool current = source_fresh && !expired;
-    if (!current) color = t->text_muted;
     lv_obj_set_style_text_color(value,
         lv_color_hex(current ? t->text : t->text_muted), 0);
     lv_obj_set_style_bg_color(bar, lv_color_hex(color), 0);
+    // 新鲜=实色；过期=半透明但仍是语义色，一眼分得清"满额但旧"与"当前满额"。
+    lv_obj_set_style_bg_opa(bar, current ? LV_OPA_COVER : LV_OPA_50, 0);
 
     if (!have_now) {
         lv_label_set_text(reset, "");
@@ -2351,6 +2355,9 @@ static void blank_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset)
     lv_obj_set_style_text_color(value, lv_color_hex(theme()->text_muted), 0);
     lv_label_set_text(value, "--");
     lv_obj_set_width(bar, 0);
+    // 复位不透明度：同一 bar 可能上一轮是过期态（LV_OPA_50），空态宽度虽为 0，
+    // 但避免残留状态污染下一次 refresh_quota_row 之前的任何中间绘制。
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
     lv_label_set_text(reset, "not active");
 }
 

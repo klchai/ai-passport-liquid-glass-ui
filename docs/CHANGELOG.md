@@ -6,6 +6,14 @@
 
 ## Unreleased
 
+- Fixed Claude quota bars washing out to near-white when their source went
+  stale. A window at 100% is the page's loudest warning, but a stale reading
+  forced the bar to muted text color -- rendering a maxed-out red bar as a
+  faint bar that was hard to tell from an empty or no-data one. Stale windows
+  now keep their semantic color (accent/warning/danger by usage) and signal
+  age through half opacity instead, alongside the source-age note that already
+  says the data may be stale.
+
 - Refined page glass hierarchy: Home's hero, Activity feedback surfaces, and
   Kaboo/Claude data cards and Kaboo's model chip now use restrained optical
   edges. Passive chips and nested controls no longer read as flat fills or
