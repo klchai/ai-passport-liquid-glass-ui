@@ -6,6 +6,15 @@
 
 ## Unreleased
 
+- Replaced the photographic blue wallpaper with an original graphite one.
+  Satin folds of cool light rise from the lower left, so the Home dock and
+  the footer glass have light behind them to transmit, while the title area
+  stays dark. tools/build_liquid_glass_wallpaper.py generates the scene and
+  ordered-dithers it so the dark gradients do not band in RGB565. The table
+  the glass rims use to borrow background color now matches the asset it
+  samples -- the old table did not match the baked wallpaper -- and
+  validate.sh fails if the two drift apart.
+
 - Fixed three liquid-glass rendering issues. Circular and capsule glass --
   Player's Quick Actions trigger, the Focus toggle knob, the Controls slider
   thumb, Activity's status chips, and Kaboo's model chip -- now draws its

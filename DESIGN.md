@@ -15,8 +15,8 @@ build is flashed and measured on the physical board.
 ## Direction contract
 
 - **Thesis:** one optically active control plane floats above stable content.
-- **Visual world:** a deep photographic background, full-bleed quiet content
-  canvases, restrained cool light, and glass reserved for action and focus.
+- **Visual world:** a deep graphite background with satin folds of cool light,
+  full-bleed quiet content canvases, and glass reserved for action and focus.
 - **First view:** the content layer explains itself immediately; the persistent
   bottom platter communicates input and page position without covering content.
 - **Signature interaction:** one trigger expands into its own menu with a

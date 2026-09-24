@@ -70,6 +70,10 @@ run_static_checks() {
     # checked-in TTF and SYMBOLS; a stale copy would silently draw empty boxes
     # for any glyph added to SYMBOLS but not regenerated.
     PYTHONDONTWRITEBYTECODE=1 python3 tools/gen_digit_font.py --check
+    # The rim renderer borrows wallpaper color from a LUT in ui_glass_optics.c;
+    # a rebuilt wallpaper without refreshed samples would tint every glass rim
+    # with the old image's colors.
+    PYTHONDONTWRITEBYTECODE=1 python3 tools/build_liquid_glass_wallpaper.py --check-samples
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_capture_screen.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_verify_firmware.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_usage_bridge.py

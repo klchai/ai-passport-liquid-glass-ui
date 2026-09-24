@@ -6,6 +6,12 @@
 
 ## Unreleased
 
+- 用原创的石墨灰壁纸替换原来的蓝色摄影壁纸。冷色光的丝绸褶线从左下方升起，Home
+  的 dock 与 footer 玻璃背后有光可透，标题区域仍保持深色。场景由
+  tools/build_liquid_glass_wallpaper.py 生成并做有序抖动，深色渐变在 RGB565 下不会
+  出现色带。玻璃光学边借用背景色的取色表现在与其采样的资源一致——旧表与烘焙后的
+  壁纸并不相符——两者不一致时 validate.sh 会失败。
+
 - 修复三处液态玻璃渲染问题。圆形与胶囊形玻璃——Player 的 Quick Actions 触发按钮、
   Focus toggle 旋钮、Controls 滑块拇指、Activity 状态标签与 Kaboo 模型标签——现在
   都会画出光学边。下方"细化各页面的玻璃层级"一条称标签已用上克制的光学边缘，但

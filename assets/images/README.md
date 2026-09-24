@@ -13,10 +13,18 @@ Store reusable source images and generated display assets here.
 
 ## Liquid Glass wallpaper
 
-- `liquid_glass_wallpaper_source.jpg`: 720 × 960 source crop used for review and future reprocessing.
-- `liquid_glass_wallpaper.rgb565`: 240 × 320 little-endian RGB565 firmware asset; generated with `python tools/build_liquid_glass_wallpaper.py`.
+- `liquid_glass_wallpaper.rgb565`: 240 × 320 little-endian RGB565 firmware
+  asset showing graphite satin folds; generated with
+  `python tools/build_liquid_glass_wallpaper.py` (requires `ffmpeg`).
+- Source: an original procedural scene defined in that script and rendered at
+  720 × 960 with 16-bit precision, so the script is the editable source. Pass
+  `--source <image>` to build from another image instead.
 - Integration: embedded from `main/CMakeLists.txt` and rendered directly from Flash by `main/ui_glass.c`; no full-screen decode buffer is allocated.
-- Optimization: the static blue tint and title-readability gradient are baked
-  into the RGB565 asset so redraws do not alpha-blend two full-screen layers.
-- Source: [Unsplash glass wallpaper search](https://unsplash.com/s/photos/glass-wallpaper), image asset `photo-1706101299176-292d8c5e470e`.
-- License: [Unsplash License](https://unsplash.com/license).
+- Optimization: the static neutral tint and title-readability gradient are
+  baked into the RGB565 asset so redraws do not alpha-blend two full-screen
+  layers. A 4 × 4 ordered dither keeps the dark gradients from banding in
+  RGB565.
+- Rim colors: the script prints the `WALLPAPER_CENTER_SAMPLES` rows for
+  `main/ui_glass_optics.c`. Update them with every new asset;
+  `tools/validate.sh` runs `--check-samples` and fails if they drift.
+- License: original work, covered by the repository [license](../../LICENSE).
