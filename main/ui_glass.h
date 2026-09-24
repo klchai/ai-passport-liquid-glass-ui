@@ -18,6 +18,9 @@ lv_obj_t *ui_glass_screen_create(void);
 
 // Creates a lightweight glass surface. The center is a flat neutral tint; only
 // a three-pixel edge profile and local specular segments receive custom draws.
+// Like LVGL, the rim clamps `radius` to half the short side, so circles and
+// LV_RADIUS_CIRCLE capsules keep their rings. Circles have no straight edge
+// and therefore draw no specular segments or glint.
 lv_obj_t *ui_glass_surface_create(lv_obj_t *parent, int x, int y, int w, int h,
                                   int radius, uint32_t tint, lv_opa_t opacity,
                                   ui_glass_material_t material);

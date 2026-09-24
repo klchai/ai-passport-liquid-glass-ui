@@ -6,6 +6,24 @@
 
 ## Unreleased
 
+- Fixed three liquid-glass rendering issues. Circular and capsule glass --
+  Player's Quick Actions trigger, the Focus toggle knob, the Controls slider
+  thumb, Activity's status chips, and Kaboo's model chip -- now draws its
+  optical rim. The "Refined page glass hierarchy" entry below promised chips
+  restrained edges, but the rim code capped the corner radius by width
+  alone, found no straight edge on any circle or LV_RADIUS_CIRCLE capsule,
+  and returned before drawing a single ring. The radius now follows LVGL's
+  clamp to half the short side; circles draw their rings but no straight
+  specular segments or glint.
+  The Controls slider thumb renders as a full 14x14 glass thumb instead of a
+  6 px dash: LVGL 9.5's overflow-visible flag widens a parent's clip only by
+  the parent's own extra draw size, which is zero for the plain track, so
+  the thumb, a child of the six-pixel track, was cut to the track's height.
+  It is now the track's sibling. The Moments art card keeps all four rounded
+  corners: LVGL clips children to the card's rectangle rather than its
+  rounded outline, so the decorative circle and band squared off the
+  top-right and bottom-left corners. Both shapes now sit inside the outline.
+
 - Fixed Claude quota bars washing out to near-white when their source went
   stale. A window at 100% is the page's loudest warning, but a stale reading
   forced the bar to muted text color -- rendering a maxed-out red bar as a

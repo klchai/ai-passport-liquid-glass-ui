@@ -49,6 +49,11 @@ ui_glass_component_t ui_glass_row_create(lv_obj_t *parent,
 ui_glass_component_t ui_glass_toggle_create(
     lv_obj_t *parent, int x, int y, int width, int height,
     const char *label, bool enabled, const ui_glass_theme_t *theme);
+
+// The slider's indicator is its six-pixel track and auxiliary its glass
+// thumb. The thumb is the track's sibling under root rather than its child,
+// so it can overhang the track; restyling or hiding indicator does not
+// affect it.
 ui_glass_component_t ui_glass_slider_create(
     lv_obj_t *parent, int x, int y, int width, int height,
     const char *label, uint8_t percent, const ui_glass_theme_t *theme);

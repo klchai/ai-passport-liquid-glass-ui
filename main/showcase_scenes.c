@@ -1089,9 +1089,22 @@ static void build_buttons(lv_obj_t *root)
     lv_obj_t *art = solid_object(stage, 6, 6, 196, 70,
                                  UI_GLASS_RADIUS_PANEL,
                                  0x174B68, LV_OPA_COVER);
-    solid_object(art, 128, -18, 82, 82, LV_RADIUS_CIRCLE,
+    // 两块装饰都完整落在卡片 196x70 r18 的圆角轮廓之内：LVGL 只按父对象的
+    // 矩形包围盒裁剪子对象、不看 radius，越出卡片的形状会把所在的角切成直角。
+    // 不用 clip_corner：它要把卡片上下两条 r18 圆角带各画进一块 ARGB8888
+    // layer（196x18x4 ≈ 14 KB），重绘时从 48 KiB 的 LVGL 池里临时分配，而该池
+    // 同时承载本页全部对象，池耗尽曾让渲染任务死锁。所以由几何保证：
+    //  - 青色圆 60x60 与卡片顶边、右边相切（x136..195、y0..59）。半径 30
+    //    不小于角半径 18，相切的圆在右上角处始终位于 r18 圆弧内侧，碰不到角。
+    //    左缘与 "Night Drive" 的末字留出约 5 px：只隔一两个像素会读成不小心
+    //    蹭上，而不是有意的构图。
+    //  - 靛蓝带要贴住左下角，所以取同一个 r18，左边和底边都与卡片对齐，
+    //    两段圆弧逐像素重合。带高至少 36 = 2*18，否则 LVGL 把半径压到短边
+    //    的一半，更尖的角会探出卡片圆弧。带顶 y34 紧贴 "Night Drive" 行框
+    //    （y12..33）之下，"Demo | 12 moments"（y42..57）落在带内。
+    solid_object(art, 136, 0, 60, 60, LV_RADIUS_CIRCLE,
                  0x5AC8E8, LV_OPA_40);
-    solid_object(art, -12, 42, 132, 42, UI_GLASS_RADIUS_PANEL,
+    solid_object(art, 0, 34, 120, 36, UI_GLASS_RADIUS_PANEL,
                  0x343873, LV_OPA_80);
     text_at(art, "Night Drive", 14, 12,
             &lv_font_montserrat_20, t->text);

@@ -212,28 +212,34 @@ ui_glass_component_t ui_glass_slider_create(
     // A long label and a horizontal track do not share one readable baseline
     // on the 196 px content width. Use the same two-line hierarchy as Progress:
     // label first, full-width track below, with a deliberate vertical gap.
+    const int track_y = 29;
     component.indicator = plain_object(
-        component.root, UI_GLASS_SPACE_MD, 29,
+        component.root, UI_GLASS_SPACE_MD, track_y,
         width - UI_GLASS_SPACE_MD * 2, 6);
     lv_obj_set_style_radius(component.indicator, LV_RADIUS_CIRCLE, 0);
-    // The glass thumb is taller than the track. Keep it as a child so its
-    // percentage is track-relative, but allow its optical rim to draw outside
-    // the six-pixel track instead of clipping it into a progress dash.
-    lv_obj_add_flag(component.indicator, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_set_style_bg_color(component.indicator,
                               lv_color_hex(theme->text_muted), 0);
     lv_obj_set_style_bg_opa(component.indicator, LV_OPA_30, 0);
+    // The 14 px glass thumb is taller than the six-pixel track, so it is a
+    // sibling of the track (created after it, to draw on top) rather than a
+    // child. In LVGL 9.5, LV_OBJ_FLAG_OVERFLOW_VISIBLE only widens the area a
+    // parent grants its children by the parent's own ext draw size, both when
+    // drawing (lv_obj_redraw) and when truncating their invalidations
+    // (lv_obj_area_is_visible). The track's ext draw size is zero, so a child
+    // thumb was clipped to the track's six rows and drew as a 14x6 dash.
+    // Under root only the slider's own bounds clip it, and the setters add
+    // the track's measured x so the percentage stays track-relative.
     component.auxiliary = ui_glass_surface_create(
-        component.indicator, 0, -4, 14, 14, LV_RADIUS_CIRCLE,
-        theme->accent, LV_OPA_90, theme->control_material);
+        component.root, UI_GLASS_SPACE_MD, track_y - 4, 14, 14,
+        LV_RADIUS_CIRCLE, theme->accent, LV_OPA_90, theme->control_material);
     ui_glass_surface_set_edge_strength(component.auxiliary,
                                        thumb_edge_strength(theme));
     // ui_glass_slider_set() derives the thumb position from the track's
-    // measured width, and LVGL only applies the size set above on its next
-    // layout pass. Without this the create-time call measures zero and pins
-    // the thumb to the left end, so the slider opened at 0 % whatever value
-    // it was given. Later calls from a key press ran after a layout and did
-    // move it, which is why only the initial position looked wrong.
+    // measured x and width, and LVGL only applies the geometry set above on
+    // its next layout pass. Without this the create-time call measures zero
+    // and pins the thumb to the left end, so the slider opened at 0 % whatever
+    // value it was given. Later calls from a key press ran after a layout and
+    // did move it, which is why only the initial position looked wrong.
     lv_obj_update_layout(component.indicator);
     ui_glass_slider_set(&component, percent, theme);
     return component;
@@ -297,6 +303,17 @@ void ui_glass_toggle_set(ui_glass_component_t *component, bool enabled,
     lv_obj_set_x(component->auxiliary, enabled ? 20 : 2);
 }
 
+// The slider thumb is the track's sibling under root (see
+// ui_glass_slider_create), so its x is in root coordinates: the track's own
+// x plus the travel along it. Both come from the track's laid-out geometry,
+// which keeps 0 % and 100 % flush with the track ends.
+static int32_t slider_thumb_x(const ui_glass_component_t *component,
+                              uint8_t percent)
+{
+    int32_t travel = lv_obj_get_width(component->indicator) - 14;
+    return lv_obj_get_x(component->indicator) + travel * percent / 100;
+}
+
 void ui_glass_slider_set(ui_glass_component_t *component, uint8_t percent,
                          const ui_glass_theme_t *theme)
 {
@@ -308,9 +325,7 @@ void ui_glass_slider_set(ui_glass_component_t *component, uint8_t percent,
     if (component->value) {
         lv_label_set_text_fmt(component->value, "%u%%", percent);
     }
-    int track_width = lv_obj_get_width(component->indicator);
-    int x = (track_width - 14) * percent / 100;
-    lv_obj_set_x(component->auxiliary, x);
+    lv_obj_set_x(component->auxiliary, slider_thumb_x(component, percent));
     lv_obj_set_style_bg_color(component->auxiliary,
                               lv_color_hex(theme->accent), 0);
     lv_obj_set_style_bg_opa(component->auxiliary, LV_OPA_COVER, 0);
@@ -349,8 +364,7 @@ void ui_glass_slider_set_animated(ui_glass_component_t *component,
     if (component->value) {
         lv_label_set_text_fmt(component->value, "%u%%", percent);
     }
-    int track_width = lv_obj_get_width(component->indicator);
-    int target_x = (track_width - 14) * percent / 100;
+    int32_t target_x = slider_thumb_x(component, percent);
     lv_obj_set_style_bg_color(component->auxiliary,
                               lv_color_hex(theme->accent), 0);
     lv_obj_set_style_bg_opa(component->auxiliary, LV_OPA_COVER, 0);

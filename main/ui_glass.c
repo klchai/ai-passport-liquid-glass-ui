@@ -50,9 +50,9 @@ static bool glint_area(const lv_obj_t *surface,
 
     lv_area_t bounds;
     lv_obj_get_coords(surface, &bounds);
-    int16_t radius = state->radius;
     int16_t width = (int16_t)lv_area_get_width(&bounds);
-    if (radius > width / 2) radius = width / 2;
+    int16_t height = (int16_t)lv_area_get_height(&bounds);
+    int16_t radius = ui_glass_effective_radius(state->radius, width, height);
     int16_t safe_left = (int16_t)(bounds.x1 + radius);
     int16_t safe_right = (int16_t)(bounds.x2 - radius);
     int16_t safe_width = (int16_t)(safe_right - safe_left);
@@ -115,8 +115,8 @@ static void surface_draw(lv_event_t *event)
                      lv_obj_get_style_transform_width(surface, LV_PART_MAIN),
                      lv_obj_get_style_transform_height(surface, LV_PART_MAIN));
     int16_t width = (int16_t)lv_area_get_width(&bounds);
-    int16_t radius = state->radius;
-    if (radius > width / 2) radius = width / 2;
+    int16_t height = (int16_t)lv_area_get_height(&bounds);
+    int16_t radius = ui_glass_effective_radius(state->radius, width, height);
 
     ui_glass_optics_t optics = ui_glass_optics_for_material(state->material);
     uint8_t strength = state->edge_strength;
@@ -125,7 +125,6 @@ static void surface_draw(lv_event_t *event)
     int16_t safe_left = (int16_t)(bounds.x1 + radius);
     int16_t safe_right = (int16_t)(bounds.x2 - radius);
     int16_t safe_width = safe_right - safe_left;
-    if (safe_width <= 0) return;
 
     {
         uint32_t top_sample = ui_glass_background_at_y(
@@ -152,6 +151,11 @@ static void surface_draw(lv_event_t *event)
             border.side = LV_BORDER_SIDE_FULL;
             lv_draw_border(layer, &border, &ring_bounds);
         }
+
+        // The rings follow any outline, but the specular, refraction and
+        // glint segments are straight lines that need a straight top/bottom
+        // run. A circle has none, so it keeps only its rings.
+        if (safe_width <= 0) return;
 
         // Highlights occupy different parts of the perimeter, avoiding the
         // doubled full-width white rules that made the earlier version look

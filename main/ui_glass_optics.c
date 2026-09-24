@@ -102,3 +102,14 @@ int16_t ui_glass_glint_center(int32_t progress, int16_t left, int16_t right)
     int32_t width = (int32_t)right - left;
     return (int16_t)(left + (width * progress) / UI_GLASS_ANIM_PROGRESS_MAX);
 }
+
+int16_t ui_glass_effective_radius(int16_t radius, int16_t width,
+                                  int16_t height)
+{
+    // Same rule as LVGL's `short_side >> 1` clamp. The radius is only compared,
+    // never added to or doubled, so LV_RADIUS_CIRCLE cannot overflow int16_t.
+    int16_t short_side = width < height ? width : height;
+    if (short_side <= 0 || radius <= 0) return 0;
+    int16_t limit = (int16_t)(short_side / 2);
+    return radius < limit ? radius : limit;
+}
