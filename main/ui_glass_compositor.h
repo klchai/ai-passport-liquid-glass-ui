@@ -11,7 +11,8 @@ typedef struct ui_glass_compositor ui_glass_compositor_t;
 // Creates one covering RGB565 renderer that fuses the wallpaper and
 // overlapping deck fills straight into LVGL's active draw buffer. Card
 // content remains as ordinary objects above it; deck fills and static optical
-// edges share the same direct RGB565 pass.
+// edges share the same direct RGB565 pass. The wallpaper is decoded from the
+// embedded indexed (LGP8) asset.
 ui_glass_compositor_t *ui_glass_compositor_create(lv_obj_t *parent,
                                                    uint32_t tint,
                                                    ui_glass_material_t material);

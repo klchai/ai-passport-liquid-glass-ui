@@ -2,6 +2,7 @@
 
 #include "liquid_glass_motion.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -53,6 +54,40 @@ typedef struct {
 
 uint16_t liquid_glass_rgb888_to_rgb565(uint32_t color);
 
+// ---------------------------------------------------------------------------
+// Indexed wallpaper ("LGP8"), written by tools/build_liquid_glass_wallpaper.py.
+// The graphite wallpaper uses far fewer than 256 RGB565 colors, so storing one
+// palette index per pixel is lossless and halves the bytes streamed from Flash
+// on every redraw. All multi-byte fields are little-endian:
+//   bytes 0..3    "LGP8"
+//   bytes 4..5    width           bytes 6..7    height
+//   bytes 8..9    colors used     bytes 10..11  reserved, 0
+//   bytes 12..523 256 x RGB565 palette entries (entries >= colors are 0)
+//   bytes 524..   width * height palette indices, row-major
+#define LIQUID_GLASS_INDEXED_HEADER_BYTES 12
+#define LIQUID_GLASS_PALETTE_SIZE         256
+#define LIQUID_GLASS_INDEXED_PALETTE_BYTES (LIQUID_GLASS_PALETTE_SIZE * 2)
+
+typedef struct {
+    const uint8_t *indices;  // width * height entries, row-major
+    uint16_t width;
+    uint16_t height;
+    uint16_t colors;
+} liquid_glass_indexed_image_t;
+
+// Validates the container and copies its palette into `palette` (RAM keeps
+// the per-pixel lookup off the Flash cache). Returns false for a wrong magic,
+// size or color count; `image` and `palette` are then left untouched.
+bool liquid_glass_indexed_image_parse(
+    const uint8_t *data, size_t size,
+    liquid_glass_indexed_image_t *image,
+    uint16_t palette[LIQUID_GLASS_PALETTE_SIZE]);
+
+// Writes palette[row_indices[x]] for x in [x1, x2] to output[0..x2-x1].
+void liquid_glass_indexed_row(const uint8_t *row_indices,
+                              const uint16_t palette[LIQUID_GLASS_PALETTE_SIZE],
+                              int16_t x1, int16_t x2, uint16_t *output);
+
 void liquid_glass_rgb565_lut_build(
     liquid_glass_rgb565_lut_t *lut,
     uint16_t tint,
@@ -71,6 +106,16 @@ size_t liquid_glass_coverage_spans(
     int16_t clip_x1,
     int16_t clip_x2,
     liquid_glass_span_t spans[LIQUID_GLASS_MAX_ROW_SPANS]);
+
+// Applies the deck's fused fills to one clipped row that already holds the
+// wallpaper, in place. output[0] is the pixel at x1.
+void liquid_glass_apply_coverage_row(
+    const liquid_glass_rgb565_lut_t *lut,
+    const liquid_glass_frame_t frames[LIQUID_GLASS_WINDOW_COUNT],
+    int16_t y,
+    int16_t x1,
+    int16_t x2,
+    uint16_t *output);
 
 // Composites one clipped row from the immutable wallpaper. Input and output
 // may alias, which is useful for an in-place scanline decoder.

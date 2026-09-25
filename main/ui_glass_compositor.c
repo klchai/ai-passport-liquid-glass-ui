@@ -6,11 +6,19 @@
 #include <stdbool.h>
 #include <string.h>
 
-extern const uint8_t liquid_glass_wallpaper_rgb565_start[]
-    asm("_binary_liquid_glass_wallpaper_rgb565_start");
+extern const uint8_t liquid_glass_wallpaper_start[]
+    asm("_binary_liquid_glass_wallpaper_lgp8_start");
+extern const uint8_t liquid_glass_wallpaper_end[]
+    asm("_binary_liquid_glass_wallpaper_lgp8_end");
+
+// Drawn instead of the wallpaper if the embedded asset fails validation.
+#define FALLBACK_BACKGROUND 0x02060Bu
 
 struct ui_glass_compositor {
     lv_obj_t *target;
+    const uint8_t *indices;
+    size_t row_stride;  // 0 while the flat fallback is shown
+    uint16_t palette[LIQUID_GLASS_PALETTE_SIZE];
     liquid_glass_frame_t frames[LIQUID_GLASS_WINDOW_COUNT];
     liquid_glass_rgb565_lut_t lut;
     uint32_t tint_rgb888;
@@ -23,6 +31,9 @@ struct ui_glass_compositor {
 };
 
 static const char *TAG = "glass_compositor";
+// One all-zero index row stands in for every wallpaper row when the embedded
+// asset is invalid; each palette entry is then the fallback color.
+static const uint8_t s_fallback_row[LIQUID_GLASS_COMPOSITOR_WIDTH] = { 0 };
 
 static void rebuild_lut(ui_glass_compositor_t *compositor);
 
@@ -67,6 +78,17 @@ static void build_edge_styles(
     }
 }
 
+static bool deck_active(const ui_glass_compositor_t *compositor)
+{
+    for (uint8_t card = 0; card < LIQUID_GLASS_WINDOW_COUNT; ++card) {
+        if (compositor->frames[card].width > 0 &&
+            compositor->frames[card].height > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void compositor_draw_background(lv_event_t *event)
 {
     ui_glass_compositor_t *compositor = lv_event_get_user_data(event);
@@ -74,10 +96,6 @@ static void compositor_draw_background(lv_event_t *event)
     if (!compositor || !layer || !layer->draw_buf ||
         layer->color_format != LV_COLOR_FORMAT_RGB565) {
         return;
-    }
-    if (compositor->lut_dirty) {
-        rebuild_lut(compositor);
-        compositor->lut_dirty = false;
     }
 
     lv_area_t area = layer->_clip_area;
@@ -91,21 +109,29 @@ static void compositor_draw_background(lv_event_t *event)
     }
     if (area.x1 > area.x2 || area.y1 > area.y2) return;
 
-    const uint16_t *wallpaper =
-        (const uint16_t *)liquid_glass_wallpaper_rgb565_start;
+    // The dashboard never places deck cards, so its rows skip the coverage
+    // and edge passes, which would leave every pixel unchanged.
+    bool deck = deck_active(compositor);
     liquid_glass_edge_style_t edge_styles[LIQUID_GLASS_WINDOW_COUNT] = { 0 };
-    build_edge_styles(compositor, edge_styles);
+    if (deck) {
+        if (compositor->lut_dirty) {
+            rebuild_lut(compositor);
+            compositor->lut_dirty = false;
+        }
+        build_edge_styles(compositor, edge_styles);
+    }
     for (int16_t y = area.y1; y <= area.y2; ++y) {
         uint16_t *output = lv_draw_buf_goto_xy(
             layer->draw_buf,
             (uint32_t)(area.x1 - layer->buf_area.x1),
             (uint32_t)(y - layer->buf_area.y1));
         if (!output) return;
-        liquid_glass_composite_row(
-            &compositor->lut,
-            compositor->frames,
-            wallpaper + (size_t)y * LIQUID_GLASS_COMPOSITOR_WIDTH,
-            y, area.x1, area.x2, output);
+        liquid_glass_indexed_row(
+            compositor->indices + (size_t)y * compositor->row_stride,
+            compositor->palette, area.x1, area.x2, output);
+        if (!deck) continue;
+        liquid_glass_apply_coverage_row(&compositor->lut, compositor->frames,
+                                        y, area.x1, area.x2, output);
         liquid_glass_composite_edges_row(
             compositor->frames, compositor->draw_order, edge_styles,
             y, area.x1, area.x2, output);
@@ -158,6 +184,29 @@ static void compositor_deleted(lv_event_t *event)
     heap_caps_free(compositor);
 }
 
+static void load_wallpaper(ui_glass_compositor_t *compositor)
+{
+    liquid_glass_indexed_image_t image;
+    size_t size = (size_t)(liquid_glass_wallpaper_end -
+                           liquid_glass_wallpaper_start);
+    if (liquid_glass_indexed_image_parse(liquid_glass_wallpaper_start, size,
+                                         &image, compositor->palette) &&
+        image.width == LIQUID_GLASS_COMPOSITOR_WIDTH &&
+        image.height == LIQUID_GLASS_COMPOSITOR_HEIGHT) {
+        compositor->indices = image.indices;
+        compositor->row_stride = image.width;
+        return;
+    }
+    ESP_LOGE(TAG, "embedded wallpaper is invalid (%u bytes); "
+             "drawing a flat background", (unsigned)size);
+    uint16_t flat = liquid_glass_rgb888_to_rgb565(FALLBACK_BACKGROUND);
+    for (size_t index = 0; index < LIQUID_GLASS_PALETTE_SIZE; ++index) {
+        compositor->palette[index] = flat;
+    }
+    compositor->indices = s_fallback_row;
+    compositor->row_stride = 0;
+}
+
 ui_glass_compositor_t *ui_glass_compositor_create(lv_obj_t *parent,
                                                    uint32_t tint,
                                                    ui_glass_material_t material)
@@ -180,6 +229,7 @@ ui_glass_compositor_t *ui_glass_compositor_create(lv_obj_t *parent,
         compositor->glint_progress[card] = INT16_MIN;
     }
     compositor->lut_dirty = true;
+    load_wallpaper(compositor);
     compositor->target = lv_obj_create(parent);
     if (!compositor->target) {
         heap_caps_free(compositor);

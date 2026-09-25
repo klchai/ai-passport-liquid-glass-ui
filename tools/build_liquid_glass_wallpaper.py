@@ -5,9 +5,18 @@ The default source is an original procedural scene: satin folds of cool
 neutral light rising from the lower left over a graphite field. It is rendered
 at 720x960 with 16-bit precision, downscaled to the 240x320 panel with
 ffmpeg's lanczos filter, given the static neutral tint and the
-title-readability shadow, and quantized to little-endian RGB565 with a 4x4
-ordered dither. Without the dither the dark gradients band visibly in RGB565's
-5- and 6-bit channels.
+title-readability shadow, and quantized to RGB565 with a 4x4 ordered dither.
+Without the dither the dark gradients band visibly in RGB565's 5- and 6-bit
+channels.
+
+The dithered raster uses far fewer than 256 distinct RGB565 colors (137 for
+the default scene), so it is stored losslessly as an "LGP8" indexed image: a
+256-entry RGB565 palette followed by one palette index per pixel (see
+main/liquid_glass_compositor_core.h for the byte layout). That halves the
+bytes the firmware streams from Flash on every redraw. A raster with more than
+256 colors is rejected rather than quantized again. `--from-rgb565` re-encodes
+an existing 240x320 little-endian RGB565 raster without re-rendering (and
+without ffmpeg).
 
 The script also prints the WALLPAPER_CENTER_SAMPLES rows that
 main/ui_glass_optics.c uses to borrow background color at glass rims.
@@ -30,7 +39,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ASSET = ROOT / "assets/images/liquid_glass_wallpaper.rgb565"
+ASSET = ROOT / "assets/images/liquid_glass_wallpaper.lgp8"
 OPTICS_SOURCE = ROOT / "main/ui_glass_optics.c"
 
 WIDTH = 240
@@ -165,16 +174,65 @@ def bake_and_dither(rgb: list[float]) -> bytes:
     return bytes(output)
 
 
+INDEXED_MAGIC = b"LGP8"
+PALETTE_SIZE = 256
+INDEXED_HEADER = struct.Struct("<4sHHHH")
+
+
+def encode_indexed(rgb565: bytes, width: int = WIDTH,
+                   height: int = HEIGHT) -> bytes:
+    """Store a little-endian RGB565 raster losslessly as an LGP8 image.
+
+    The palette is sorted by RGB565 value so the same raster always produces
+    the same bytes.
+    """
+    if len(rgb565) != width * height * 2:
+        raise ValueError(f"expected {width * height * 2} bytes of RGB565, "
+                         f"got {len(rgb565)}")
+    pixels = struct.unpack(f"<{width * height}H", rgb565)
+    palette = sorted(set(pixels))
+    if len(palette) > PALETTE_SIZE:
+        raise ValueError(f"the wallpaper uses {len(palette)} RGB565 colors; "
+                         f"the indexed format holds at most {PALETTE_SIZE}")
+    index_of = {color: index for index, color in enumerate(palette)}
+    padded = palette + [0] * (PALETTE_SIZE - len(palette))
+    return (INDEXED_HEADER.pack(INDEXED_MAGIC, width, height, len(palette), 0)
+            + struct.pack(f"<{PALETTE_SIZE}H", *padded)
+            + bytes(index_of[pixel] for pixel in pixels))
+
+
+def decode_indexed(asset: bytes) -> list[int]:
+    """Return the RGB565 pixels of an LGP8 image, validating its layout."""
+    if len(asset) < INDEXED_HEADER.size + PALETTE_SIZE * 2:
+        raise ValueError("truncated LGP8 image")
+    magic, width, height, colors, _ = INDEXED_HEADER.unpack_from(asset)
+    if magic != INDEXED_MAGIC:
+        raise ValueError(f"not an LGP8 image (magic {magic!r})")
+    if (width, height) != (WIDTH, HEIGHT):
+        raise ValueError(f"expected {WIDTH}x{HEIGHT}, got {width}x{height}")
+    if not 0 < colors <= PALETTE_SIZE:
+        raise ValueError(f"invalid palette size {colors}")
+    offset = INDEXED_HEADER.size + PALETTE_SIZE * 2
+    if len(asset) != offset + width * height:
+        raise ValueError(f"expected {offset + width * height} bytes, "
+                         f"got {len(asset)}")
+    palette = struct.unpack_from(f"<{PALETTE_SIZE}H", asset,
+                                 INDEXED_HEADER.size)
+    indices = asset[offset:]
+    if max(indices) >= colors:
+        raise ValueError("pixel index outside the palette")
+    return [palette[index] for index in indices]
+
+
 def rgb565_to_rgb888(pixel: int) -> tuple[int, int, int]:
     red, green, blue = pixel >> 11, (pixel >> 5) & 0x3F, pixel & 0x1F
     return (red << 3 | red >> 2, green << 2 | green >> 4, blue << 3 | blue >> 2)
 
 
-def center_samples(asset: bytes) -> list[int]:
+def center_samples(pixels: list[int]) -> list[int]:
     """Average 16x5 patches on the center line, one per LUT entry."""
-    if len(asset) != WIDTH * HEIGHT * 2:
-        raise ValueError(f"expected {WIDTH * HEIGHT * 2} bytes, got {len(asset)}")
-    pixels = struct.unpack(f"<{WIDTH * HEIGHT}H", asset)
+    if len(pixels) != WIDTH * HEIGHT:
+        raise ValueError(f"expected {WIDTH * HEIGHT} pixels, got {len(pixels)}")
     samples = []
     for index in range(SAMPLE_COUNT):
         center = round(index * (HEIGHT - 1) / (SAMPLE_COUNT - 1))
@@ -210,7 +268,7 @@ def committed_samples() -> list[int]:
 
 
 def check_samples() -> int:
-    expected = center_samples(ASSET.read_bytes())
+    expected = center_samples(decode_indexed(ASSET.read_bytes()))
     actual = committed_samples()
     if actual == expected:
         print("Wallpaper rim samples: PASS")
@@ -223,9 +281,15 @@ def check_samples() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
+    raster_source = parser.add_mutually_exclusive_group()
+    raster_source.add_argument(
         "--source", type=Path,
         help="use this image instead of the generated graphite scene",
+    )
+    raster_source.add_argument(
+        "--from-rgb565", type=Path,
+        help="re-encode an existing 240x320 little-endian RGB565 raster "
+             "instead of rendering (no ffmpeg needed)",
     )
     parser.add_argument("--output", type=Path, default=ASSET)
     parser.add_argument(
@@ -236,17 +300,22 @@ def main() -> int:
     if args.check_samples:
         return check_samples()
 
-    with tempfile.TemporaryDirectory() as scratch:
-        source = args.source
-        if source is None:
-            source = Path(scratch) / "graphite_source.png"
-            write_generated_source(source)
-        asset = bake_and_dither(downscale(source))
+    if args.from_rgb565 is not None:
+        raster = args.from_rgb565.read_bytes()
+    else:
+        with tempfile.TemporaryDirectory() as scratch:
+            source = args.source
+            if source is None:
+                source = Path(scratch) / "graphite_source.png"
+                write_generated_source(source)
+            raster = bake_and_dither(downscale(source))
+    asset = encode_indexed(raster)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(asset)
-    print(f"wrote {len(asset)} bytes to {args.output}")
+    colors = INDEXED_HEADER.unpack_from(asset)[3]
+    print(f"wrote {len(asset)} bytes ({colors} colors) to {args.output}")
     print("WALLPAPER_CENTER_SAMPLES for main/ui_glass_optics.c:")
-    print(format_samples(center_samples(asset)))
+    print(format_samples(center_samples(decode_indexed(asset))))
     return 0
 
 

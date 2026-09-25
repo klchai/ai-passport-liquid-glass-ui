@@ -74,6 +74,7 @@ run_static_checks() {
     # a rebuilt wallpaper without refreshed samples would tint every glass rim
     # with the old image's colors.
     PYTHONDONTWRITEBYTECODE=1 python3 tools/build_liquid_glass_wallpaper.py --check-samples
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_build_liquid_glass_wallpaper.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_capture_screen.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_verify_firmware.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_usage_bridge.py

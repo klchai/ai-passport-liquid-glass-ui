@@ -25,5 +25,5 @@ idf_component_register(
     REQUIRES bsp bt esp_driver_usb_serial_jtag esp_hw_support esp_timer lvgl lwip
              esp_netif
              nvs_flash
-    EMBED_FILES "../assets/images/liquid_glass_wallpaper.rgb565"
+    EMBED_FILES "../assets/images/liquid_glass_wallpaper.lgp8"
 )
