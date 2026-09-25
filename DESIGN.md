@@ -179,6 +179,12 @@ to restore it. One full-screen transition cannot permanently downgrade the UI.
 The BSP publishes one-second snapshots for update rate, CPU render time, DMA
 wait, SPI wire-time floor, updated pixels, invalidation requests, and DMA heap.
 
+The compositor decodes the indexed (LGP8) wallpaper straight into LVGL's draw
+buffer, one palette lookup per pixel. Full-bleed content canvases are drawn in
+the same pass through a pre-tinted copy of that palette, so the quieted
+wallpaper costs no per-pixel blend; the canvas objects stay transparent and
+only supply geometry.
+
 ## Prohibited defaults
 
 - Glass as a generic content-card style.

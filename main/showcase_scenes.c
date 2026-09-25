@@ -390,6 +390,31 @@ static lv_obj_t *content_layer_create(lv_obj_t *parent, int x, int y,
     return plain_object(parent, x, y, width, height);
 }
 
+// A content canvas quiets the wallpaper under a page. The compositor draws
+// it in the wallpaper pass (one palette lookup per pixel instead of a copy
+// plus an LVGL blend), so the object stays transparent. Only if the
+// compositor has no free slot does LVGL fill the object itself.
+static void quiet_canvas_set(lv_obj_t *canvas, uint32_t color, lv_opa_t opa)
+{
+    if (ui_glass_compositor_set_canvas(s_runtime.backdrop, canvas, color,
+                                       opa)) {
+        ui_glass_set_bg_opa_if_changed(canvas, LV_OPA_TRANSP);
+        return;
+    }
+    ui_glass_set_bg_color_if_changed(canvas, color);
+    ui_glass_set_bg_opa_if_changed(canvas, opa);
+}
+
+static lv_obj_t *quiet_canvas_create(lv_obj_t *parent, int x, int y,
+                                     int width, int height,
+                                     uint32_t color, lv_opa_t opa)
+{
+    lv_obj_t *canvas = plain_object(parent, x, y, width, height);
+    lv_obj_set_style_radius(canvas, 0, 0);
+    quiet_canvas_set(canvas, color, opa);
+    return canvas;
+}
+
 static lv_opa_t content_canvas_opacity(void)
 {
     switch (s_runtime.mode) {
@@ -418,8 +443,8 @@ static lv_obj_t *showcase_content_stage_create(
     // Quiet the photographic wallpaper edge-to-edge instead of placing every
     // scene in the same rounded card. The footer remains above the undimmed
     // wallpaper so its own glass transmission stays visible.
-    solid_object(root, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH, 228, 0,
-                 t->content_surface, content_canvas_opacity());
+    quiet_canvas_create(root, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH, 228,
+                        t->content_surface, content_canvas_opacity());
     return content_layer_create(root, 16, 4, 208, 204, t);
 }
 
@@ -1205,8 +1230,8 @@ static void build_buttons(lv_obj_t *root)
 static void build_selection(lv_obj_t *root)
 {
     const ui_glass_theme_t *t = theme();
-    s_selection_canvas = solid_object(
-        root, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH, 228, 0,
+    s_selection_canvas = quiet_canvas_create(
+        root, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH, 228,
         t->content_surface,
         accessible_opacity(s_selection_check ? 160 : 64));
     lv_obj_t *stage = content_layer_create(root, 16, 4, 208, 204, t);
@@ -2172,8 +2197,9 @@ static lv_obj_t *data_stage(lv_obj_t *root)
     const ui_glass_theme_t *t = theme();
     // Keep the standard wallpaper treatment while honoring accessibility modes.
     lv_opa_t canvas_opacity = content_canvas_opacity();
-    solid_object(root, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH,
-                 SHOWCASE_SCENE_HEIGHT, 0, t->content_surface, canvas_opacity);
+    quiet_canvas_create(root, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH,
+                        SHOWCASE_SCENE_HEIGHT, t->content_surface,
+                        canvas_opacity);
     lv_obj_t *fade = solid_object(root, 0, 196, LIQUID_GLASS_COMPOSITOR_WIDTH,
                                   SHOWCASE_SCENE_HEIGHT - 196, 0,
                                   t->content_surface, LV_OPA_TRANSP);
@@ -2947,8 +2973,9 @@ static void focused_action(void)
             showcase_choice_set(&s_focus_components[2], s_selection_check,
                                 theme());
             if (s_selection_canvas) {
-                lv_obj_set_style_bg_opa(s_selection_canvas,
-                    accessible_opacity(s_selection_check ? 160 : 64), 0);
+                quiet_canvas_set(
+                    s_selection_canvas, theme()->content_surface,
+                    accessible_opacity(s_selection_check ? 160 : 64));
             }
         } else {
             s_selection_radio = !s_selection_radio;

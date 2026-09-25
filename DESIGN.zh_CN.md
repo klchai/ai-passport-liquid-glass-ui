@@ -152,6 +152,10 @@ Runtime 管理壁纸合成器、语义 Mode、刷新 Timer，以及带迟滞的�
 BSP 每秒提供 Update Rate、CPU Render、DMA Wait、SPI Wire-Time Floor、更新像素、
 Invalidation 请求和 DMA Heap 快照。
 
+合成器把索引色（LGP8）壁纸逐行解码、直接写入 LVGL 绘制缓冲区，每像素一次调色板查表。
+全屏内容画布在同一遍中绘制：用预先着色的调色板副本解码，压暗后的壁纸不再需要逐像素
+混合；画布对象本身保持透明，只提供几何范围。
+
 ## 禁止作为默认方案
 
 - 把 Glass 当作通用内容卡片样式。

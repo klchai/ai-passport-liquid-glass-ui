@@ -105,6 +105,41 @@ void liquid_glass_indexed_row(const uint8_t *row_indices,
     while (count-- > 0) *output++ = palette[*index++];
 }
 
+uint16_t liquid_glass_rgb565_fill_mix(uint16_t foreground, uint16_t background,
+                                      uint8_t opa)
+{
+    if (opa <= LIQUID_GLASS_FILL_OPA_MIN) return background;
+    if (opa >= LIQUID_GLASS_FILL_OPA_MAX) return foreground;
+    if (foreground == background) return foreground;
+    // lv_color_16_16_mix(): 5-bit weight on the packed 0x07E0F81F layout.
+    uint32_t mix = ((uint32_t)opa + 4u) >> 3;
+    uint32_t bg = (uint32_t)(background | (uint32_t)background << 16) &
+                  0x7E0F81Fu;
+    uint32_t fg = (uint32_t)(foreground | (uint32_t)foreground << 16) &
+                  0x7E0F81Fu;
+    uint32_t result = ((((fg - bg) * mix) >> 5) + bg) & 0x7E0F81Fu;
+    return (uint16_t)((result >> 16) | result);
+}
+
+void liquid_glass_palette_tint(const uint16_t palette[LIQUID_GLASS_PALETTE_SIZE],
+                               uint16_t color, uint8_t opa,
+                               uint16_t out[LIQUID_GLASS_PALETTE_SIZE])
+{
+    if (!palette || !out) return;
+    for (size_t index = 0; index < LIQUID_GLASS_PALETTE_SIZE; ++index) {
+        out[index] = liquid_glass_rgb565_fill_mix(color, palette[index], opa);
+    }
+}
+
+void liquid_glass_fill_mix_span(uint16_t *pixels, int16_t count,
+                                uint16_t color, uint8_t opa)
+{
+    if (!pixels) return;
+    for (int16_t index = 0; index < count; ++index) {
+        pixels[index] = liquid_glass_rgb565_fill_mix(color, pixels[index], opa);
+    }
+}
+
 void liquid_glass_rgb565_lut_build(
     liquid_glass_rgb565_lut_t *lut,
     uint16_t tint,

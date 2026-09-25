@@ -145,9 +145,58 @@ static void test_indexed_image(void)
     }
 }
 
+static void test_fill_mix_matches_lvgl(void)
+{
+    // Theme content surfaces and extremes, over every RGB565 background and
+    // every canvas opacity the dashboard uses plus the LVGL thresholds.
+    const uint16_t foregrounds[] = {
+        liquid_glass_rgb888_to_rgb565(0x071421u),
+        liquid_glass_rgb888_to_rgb565(0x050C13u),
+        liquid_glass_rgb888_to_rgb565(0x0A1722u),
+        0x0000, 0xFFFF, 0xF81F,
+    };
+    const uint8_t opacities[] = {
+        0, 1, 2, 3, 64, 96, 160, 224, 252, 253, 254, 255,
+    };
+    for (size_t f = 0; f < sizeof(foregrounds) / sizeof(foregrounds[0]); ++f) {
+        for (size_t o = 0; o < sizeof(opacities); ++o) {
+            uint8_t opa = opacities[o];
+            for (uint32_t background = 0; background <= UINT16_MAX;
+                 ++background) {
+                uint16_t expected =
+                    opa <= LIQUID_GLASS_FILL_OPA_MIN ? (uint16_t)background
+                    : opa >= LIQUID_GLASS_FILL_OPA_MAX ? foregrounds[f]
+                    : lvgl_reference_mix(foregrounds[f],
+                                         (uint16_t)background, opa);
+                assert(liquid_glass_rgb565_fill_mix(
+                           foregrounds[f], (uint16_t)background, opa) ==
+                       expected);
+            }
+        }
+    }
+
+    uint16_t palette[LIQUID_GLASS_PALETTE_SIZE];
+    uint16_t tinted[LIQUID_GLASS_PALETTE_SIZE];
+    for (int index = 0; index < LIQUID_GLASS_PALETTE_SIZE; ++index) {
+        palette[index] = (uint16_t)(index * 257u);
+    }
+    liquid_glass_palette_tint(palette, foregrounds[0], 96, tinted);
+    for (int index = 0; index < LIQUID_GLASS_PALETTE_SIZE; ++index) {
+        assert(tinted[index] == liquid_glass_rgb565_fill_mix(
+                   foregrounds[0], palette[index], 96));
+    }
+
+    uint16_t span[LIQUID_GLASS_PALETTE_SIZE];
+    memcpy(span, palette, sizeof(span));
+    liquid_glass_fill_mix_span(span, LIQUID_GLASS_PALETTE_SIZE,
+                               foregrounds[0], 96);
+    assert(memcmp(span, tinted, sizeof(span)) == 0);
+}
+
 int main(void)
 {
     test_indexed_image();
+    test_fill_mix_matches_lvgl();
 
     liquid_glass_frame_t frames[LIQUID_GLASS_WINDOW_COUNT];
     for (uint8_t card = 0; card < LIQUID_GLASS_WINDOW_COUNT; ++card) {

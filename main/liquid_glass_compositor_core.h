@@ -88,6 +88,25 @@ void liquid_glass_indexed_row(const uint8_t *row_indices,
                               const uint16_t palette[LIQUID_GLASS_PALETTE_SIZE],
                               int16_t x1, int16_t x2, uint16_t *output);
 
+// LVGL 9.5's exact RGB565 arithmetic for a flat fill at `opa` over one pixel
+// (lv_draw_sw_blend_color_to_rgb565 with lv_color_16_16_mix): opa <= 2
+// (LV_OPA_MIN) draws nothing and opa >= 253 (LV_OPA_MAX) covers.
+#define LIQUID_GLASS_FILL_OPA_MIN 2
+#define LIQUID_GLASS_FILL_OPA_MAX 253
+uint16_t liquid_glass_rgb565_fill_mix(uint16_t foreground, uint16_t background,
+                                      uint8_t opa);
+
+// out[i] = the wallpaper color palette[i] seen through a flat `color` layer
+// at `opa`. Decoding an index row through `out` then reproduces LVGL drawing
+// that layer over the decoded wallpaper, pixel for pixel.
+void liquid_glass_palette_tint(const uint16_t palette[LIQUID_GLASS_PALETTE_SIZE],
+                               uint16_t color, uint8_t opa,
+                               uint16_t out[LIQUID_GLASS_PALETTE_SIZE]);
+
+// Applies the same flat layer to `count` already-composited pixels in place.
+void liquid_glass_fill_mix_span(uint16_t *pixels, int16_t count,
+                                uint16_t color, uint8_t opa);
+
 void liquid_glass_rgb565_lut_build(
     liquid_glass_rgb565_lut_t *lut,
     uint16_t tint,

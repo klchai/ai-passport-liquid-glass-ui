@@ -32,7 +32,9 @@ Store reusable source images and generated display assets here.
 - Optimization: the static neutral tint and title-readability gradient are
   baked into the asset so redraws do not alpha-blend two full-screen layers.
   A 4 × 4 ordered dither keeps the dark gradients from banding in RGB565.
-  One byte per pixel halves the Flash reads of the previous RGB565 raster.
+  One byte per pixel halves the Flash reads of the previous RGB565 raster,
+  and the compositor dims the wallpaper under a page's content canvas by
+  decoding through a pre-tinted copy of the palette.
 - Rim colors: the script prints the `WALLPAPER_CENTER_SAMPLES` rows for
   `main/ui_glass_optics.c`. Update them with every new asset;
   `tools/validate.sh` runs `--check-samples` and fails if they drift.

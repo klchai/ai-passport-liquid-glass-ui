@@ -11,14 +11,33 @@ extern const uint8_t liquid_glass_wallpaper_start[]
 extern const uint8_t liquid_glass_wallpaper_end[]
     asm("_binary_liquid_glass_wallpaper_lgp8_end");
 
+// A scene owns at most one content canvas; a page transition shows two.
+#define CANVAS_SLOTS 2
 // Drawn instead of the wallpaper if the embedded asset fails validation.
 #define FALLBACK_BACKGROUND 0x02060Bu
+
+typedef struct {
+    lv_obj_t *object;  // NULL while the slot is free
+    uint32_t sequence; // registration order
+    uint16_t color;
+    uint8_t opa;
+    // The wallpaper palette as seen through this canvas. One lookup per pixel
+    // replaces the wallpaper copy plus LVGL's per-pixel blend of the canvas.
+    uint16_t palette[LIQUID_GLASS_PALETTE_SIZE];
+} canvas_slot_t;
+
+typedef struct {
+    const canvas_slot_t *slot;
+    lv_area_t area;  // visible screen area inside the current draw clip
+} visible_canvas_t;
 
 struct ui_glass_compositor {
     lv_obj_t *target;
     const uint8_t *indices;
     size_t row_stride;  // 0 while the flat fallback is shown
     uint16_t palette[LIQUID_GLASS_PALETTE_SIZE];
+    canvas_slot_t canvas[CANVAS_SLOTS];
+    uint32_t canvas_sequence;
     liquid_glass_frame_t frames[LIQUID_GLASS_WINDOW_COUNT];
     liquid_glass_rgb565_lut_t lut;
     uint32_t tint_rgb888;
@@ -89,6 +108,131 @@ static bool deck_active(const ui_glass_compositor_t *compositor)
     return false;
 }
 
+static uint8_t visible_canvases(const ui_glass_compositor_t *compositor,
+                                const lv_area_t *clip,
+                                visible_canvas_t visible[CANVAS_SLOTS])
+{
+    uint8_t count = 0;
+    for (uint8_t index = 0; index < CANVAS_SLOTS; ++index) {
+        const canvas_slot_t *slot = &compositor->canvas[index];
+        if (!slot->object) continue;
+        // The object's area clipped by every ancestor, or nothing while one
+        // of them is hidden: the pixels an LVGL fill of it would touch.
+        lv_area_t area;
+        lv_obj_get_coords(slot->object, &area);
+        if (!lv_obj_area_is_visible(slot->object, &area) ||
+            !lv_area_intersect(&area, &area, clip)) {
+            continue;
+        }
+        uint8_t position = count++;
+        while (position > 0 &&
+               visible[position - 1].slot->sequence > slot->sequence) {
+            visible[position] = visible[position - 1];
+            --position;
+        }
+        visible[position] = (visible_canvas_t) {
+            .slot = slot,
+            .area = area,
+        };
+    }
+    return count;
+}
+
+static void fill_span(uint16_t *output, int16_t count, uint16_t color)
+{
+    while (count-- > 0) *output++ = color;
+}
+
+// Paints one canvas over pixels that already hold what lies beneath it.
+static void mix_canvas(const canvas_slot_t *slot, uint16_t *output,
+                       int16_t count)
+{
+    if (slot->opa >= LIQUID_GLASS_FILL_OPA_MAX) {
+        fill_span(output, count, slot->color);
+    } else {
+        liquid_glass_fill_mix_span(output, count, slot->color, slot->opa);
+    }
+}
+
+// Rows without deck cards cost one palette lookup per pixel: the wallpaper
+// palette outside the canvases and a canvas's tinted palette under it.
+static void draw_row_without_deck(const ui_glass_compositor_t *compositor,
+                                  const visible_canvas_t *canvases,
+                                  uint8_t canvas_count,
+                                  const uint8_t *row,
+                                  int16_t y,
+                                  int16_t x1,
+                                  int16_t x2,
+                                  uint16_t *output)
+{
+    int16_t x = x1;
+    while (x <= x2) {
+        // Split the row wherever the set of covering canvases changes.
+        int16_t end = x2;
+        uint8_t covering = 0;
+        const canvas_slot_t *lowest = NULL;
+        for (uint8_t index = 0; index < canvas_count; ++index) {
+            const lv_area_t *area = &canvases[index].area;
+            if (y < area->y1 || y > area->y2 || area->x2 < x) continue;
+            if (area->x1 <= x) {
+                if (covering++ == 0) lowest = canvases[index].slot;
+                if (area->x2 < end) end = (int16_t)area->x2;
+            } else if (area->x1 - 1 < end) {
+                end = (int16_t)(area->x1 - 1);
+            }
+        }
+
+        uint16_t *run = output + (x - x1);
+        int16_t count = (int16_t)(end - x + 1);
+        if (!lowest) {
+            liquid_glass_indexed_row(row, compositor->palette, x, end, run);
+        } else if (lowest->opa >= LIQUID_GLASS_FILL_OPA_MAX) {
+            fill_span(run, count, lowest->color);
+        } else {
+            liquid_glass_indexed_row(row, lowest->palette, x, end, run);
+        }
+        // Overlapping canvases, which the dashboard never shows: the lowest
+        // one is decoded above, the others blend over it in order.
+        for (uint8_t index = 0; covering > 1 && index < canvas_count;
+             ++index) {
+            const lv_area_t *area = &canvases[index].area;
+            if (y < area->y1 || y > area->y2 ||
+                area->x1 > x || area->x2 < x ||
+                canvases[index].slot == lowest) {
+                continue;
+            }
+            mix_canvas(canvases[index].slot, run, count);
+        }
+        x = (int16_t)(end + 1);
+    }
+}
+
+static void draw_row_with_deck(
+    const ui_glass_compositor_t *compositor,
+    const liquid_glass_edge_style_t edge_styles[LIQUID_GLASS_WINDOW_COUNT],
+    const visible_canvas_t *canvases,
+    uint8_t canvas_count,
+    const uint8_t *row,
+    int16_t y,
+    int16_t x1,
+    int16_t x2,
+    uint16_t *output)
+{
+    liquid_glass_indexed_row(row, compositor->palette, x1, x2, output);
+    liquid_glass_apply_coverage_row(&compositor->lut, compositor->frames,
+                                    y, x1, x2, output);
+    liquid_glass_composite_edges_row(
+        compositor->frames, compositor->draw_order, edge_styles,
+        y, x1, x2, output);
+    // Canvases are LVGL objects above the deck, so they blend in last.
+    for (uint8_t index = 0; index < canvas_count; ++index) {
+        const lv_area_t *area = &canvases[index].area;
+        if (y < area->y1 || y > area->y2) continue;
+        mix_canvas(canvases[index].slot, output + (area->x1 - x1),
+                   (int16_t)(area->x2 - area->x1 + 1));
+    }
+}
+
 static void compositor_draw_background(lv_event_t *event)
 {
     ui_glass_compositor_t *compositor = lv_event_get_user_data(event);
@@ -109,6 +253,8 @@ static void compositor_draw_background(lv_event_t *event)
     }
     if (area.x1 > area.x2 || area.y1 > area.y2) return;
 
+    visible_canvas_t canvases[CANVAS_SLOTS];
+    uint8_t canvas_count = visible_canvases(compositor, &area, canvases);
     // The dashboard never places deck cards, so its rows skip the coverage
     // and edge passes, which would leave every pixel unchanged.
     bool deck = deck_active(compositor);
@@ -126,15 +272,16 @@ static void compositor_draw_background(lv_event_t *event)
             (uint32_t)(area.x1 - layer->buf_area.x1),
             (uint32_t)(y - layer->buf_area.y1));
         if (!output) return;
-        liquid_glass_indexed_row(
-            compositor->indices + (size_t)y * compositor->row_stride,
-            compositor->palette, area.x1, area.x2, output);
-        if (!deck) continue;
-        liquid_glass_apply_coverage_row(&compositor->lut, compositor->frames,
-                                        y, area.x1, area.x2, output);
-        liquid_glass_composite_edges_row(
-            compositor->frames, compositor->draw_order, edge_styles,
-            y, area.x1, area.x2, output);
+        const uint8_t *row =
+            compositor->indices + (size_t)y * compositor->row_stride;
+        if (deck) {
+            draw_row_with_deck(compositor, edge_styles, canvases,
+                               canvas_count, row, y, area.x1, area.x2,
+                               output);
+        } else {
+            draw_row_without_deck(compositor, canvases, canvas_count, row,
+                                  y, area.x1, area.x2, output);
+        }
     }
 }
 
@@ -178,9 +325,38 @@ static void invalidate_deck_bounds(ui_glass_compositor_t *compositor)
     if (found) lv_obj_invalidate_area(compositor->target, &area);
 }
 
+static canvas_slot_t *find_canvas(ui_glass_compositor_t *compositor,
+                                  const lv_obj_t *object)
+{
+    for (uint8_t index = 0; index < CANVAS_SLOTS; ++index) {
+        if (compositor->canvas[index].object == object) {
+            return &compositor->canvas[index];
+        }
+    }
+    return NULL;
+}
+
+static void canvas_deleted(lv_event_t *event)
+{
+    ui_glass_compositor_t *compositor = lv_event_get_user_data(event);
+    canvas_slot_t *slot = find_canvas(
+        compositor, lv_event_get_current_target_obj(event));
+    if (slot) slot->object = NULL;
+}
+
 static void compositor_deleted(lv_event_t *event)
 {
     ui_glass_compositor_t *compositor = lv_event_get_user_data(event);
+    // The compositor is its screen's first child, so deleting the screen
+    // frees it before the scenes' canvases. Detach their delete callbacks so
+    // none of them reaches freed memory.
+    for (uint8_t index = 0; index < CANVAS_SLOTS; ++index) {
+        lv_obj_t *canvas = compositor->canvas[index].object;
+        if (canvas) {
+            lv_obj_remove_event_cb_with_user_data(canvas, canvas_deleted,
+                                                  compositor);
+        }
+    }
     heap_caps_free(compositor);
 }
 
@@ -365,4 +541,41 @@ void ui_glass_compositor_set_material(
     }
     compositor->lut_dirty = true;
     invalidate_deck_bounds(compositor);
+}
+
+bool ui_glass_compositor_set_canvas(ui_glass_compositor_t *compositor,
+                                    lv_obj_t *canvas,
+                                    uint32_t color,
+                                    lv_opa_t opa)
+{
+    if (!compositor || !canvas) return false;
+    canvas_slot_t *slot = find_canvas(compositor, canvas);
+    if (opa <= LIQUID_GLASS_FILL_OPA_MIN) {
+        // An LVGL fill draws nothing at this opacity either.
+        if (slot) {
+            lv_obj_remove_event_cb_with_user_data(canvas, canvas_deleted,
+                                                  compositor);
+            slot->object = NULL;
+            lv_obj_invalidate(canvas);
+        }
+        return true;
+    }
+
+    uint16_t native = liquid_glass_rgb888_to_rgb565(color);
+    if (slot && slot->color == native && slot->opa == opa) return true;
+    if (!slot) {
+        slot = find_canvas(compositor, NULL);  // a free slot
+        if (!slot || !lv_obj_add_event_cb(canvas, canvas_deleted,
+                                          LV_EVENT_DELETE, compositor)) {
+            return false;
+        }
+        slot->object = canvas;
+        slot->sequence = ++compositor->canvas_sequence;
+    }
+    slot->color = native;
+    slot->opa = opa;
+    liquid_glass_palette_tint(compositor->palette, native, opa,
+                              slot->palette);
+    lv_obj_invalidate(canvas);
+    return true;
 }
