@@ -6,6 +6,29 @@
 
 ## Unreleased
 
+- Cut the dashboard's drawing work without changing what it shows. Pages no
+  longer redraw when nothing changed: the shell stopped moving its header to
+  the front on every refresh, which repainted the whole screen on every mode
+  toggle, hint expiry, and Settings edit, and the BLE link dot stopped
+  refreshing the display five times a second on idle pages. Kaboo and Claude
+  skip labels and bars whose data did not change. Animations repaint less: a
+  Home dock change, a Player Quick Actions open, and a Settings group change
+  redraw 411k, 580k, and 25k pixels instead of 630k, 1.46M, and 77k. An OK
+  press on Moments and Devices now visibly compresses the control or the focus
+  lens; before, it redrew the row without changing a pixel. The wallpaper is
+  stored as a lossless 137-color indexed image (77,324 bytes instead of
+  153,600), which halves the Flash reads of every redraw, and the compositor
+  draws each page's quieting canvas in the same pass instead of LVGL blending
+  it pixel by pixel. Animations run at the quality tier's cadence, about 60,
+  40, or 30 frames per second instead of 30 in every tier, and the adaptive
+  quality controller now receives the display samples that drive it. LVGL's
+  style cache and 32-line draw bands trim the remaining per-frame overhead. In
+  a host simulation of this firmware every rest-state capture is
+  pixel-identical, and a scripted tour of all eleven pages takes 32% fewer CPU
+  instructions even though animations now render up to twice as many frames.
+  The 32-line draw buffers still need a board check of free heap and I2S
+  start-up before release.
+
 - Replaced the photographic blue wallpaper with an original graphite one.
   Satin folds of cool light rise from the lower left, so the Home dock and
   the footer glass have light behind them to transmit, while the title area
