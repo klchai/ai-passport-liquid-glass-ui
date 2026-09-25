@@ -305,6 +305,7 @@ static atomic_int s_audio_status = AUDIO_STARTING;
 
 static void navigation_motion_set(void *value, int32_t progress);
 static void segment_motion_set(void *value, int32_t progress);
+static void press_set(void *object, int32_t inset);
 static void focused_action(void);
 static void link_dot_refresh(void);
 static void navigation_clock_refresh(void);
@@ -597,6 +598,14 @@ static void focus_move(int8_t delta)
 {
     if (!s_focus_lens || !ui_glass_focus_move(&s_focus, delta)) return;
     focus_refresh_states();
+    // A press compresses the lens through transform_width/height, and the
+    // motion below drives transform_height too. Stop the press here so the two
+    // animations never write the same property; the motion starts from the
+    // lens's current (possibly compressed) height, so the path stays smooth.
+    lv_anim_delete(s_focus_lens, press_set);
+    if (lv_obj_get_style_transform_width(s_focus_lens, LV_PART_MAIN) != 0) {
+        lv_obj_set_style_transform_width(s_focus_lens, 0, 0);
+    }
     // Rapid button input retargets the one physical lens from its current
     // sampled position instead of allowing two animations to fight over it.
     int32_t transform_height = lv_obj_get_style_transform_height(
@@ -828,11 +837,29 @@ static void adjustment_change(int8_t direction)
     }
 }
 
+// A component root is a transparent layout box: transform_width/height only
+// resize an object's own background, so compressing the root changed no pixels
+// while still redrawing the whole row every frame. Compress what the user
+// sees instead: the component's own control surface (a Moments button, the
+// Focus pill, toggle track or check mark) or, for text-only rows such as
+// Devices, the focus lens that marks the focused row.
+static lv_obj_t *press_target(void)
+{
+    if (s_focus.index >= s_focus_count) return NULL;
+    lv_obj_t *indicator = s_focus_components[s_focus.index].indicator;
+    return indicator ? indicator : s_focus_lens;
+}
+
 static void press_focused_component(void)
 {
-    if (s_focus.index >= s_focus_count) return;
-    lv_obj_t *object = s_focus_components[s_focus.index].root;
+    lv_obj_t *object = press_target();
     if (!object) return;
+    if (object == s_focus_lens && s_focus_motion.lens == s_focus_lens &&
+        lv_anim_get(&s_focus_motion, focus_lens_set)) {
+        // The lens motion also writes transform_height; land it first.
+        lv_anim_delete(&s_focus_motion, focus_lens_set);
+        focus_motion_finish(&s_focus_motion);
+    }
     lv_anim_delete(object, press_set);
     lv_anim_t animation;
     lv_anim_init(&animation);
