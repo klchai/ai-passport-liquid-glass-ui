@@ -72,6 +72,9 @@
 #define SHOWCASE_RADIUS_CHECKBOX_OUTER 6
 #define SHOWCASE_RADIUS_CHECKBOX_INNER 3
 
+// Resting opacity of Player's full-screen dimmer while Quick Actions is open.
+#define PLAYER_DIMMER_OPA 36
+
 // Kaboo 卡片轮换：8 秒够读完一个大数字连同费用（4 秒在真机上被反馈为翻太快）。
 // 用户手动翻卡后暂停自动轮换一段时间，避免刚看清就被翻走。
 #define KABOO_CARD_COUNT          3
@@ -286,6 +289,10 @@ static uint8_t s_stepper_value = 3;
 static uint8_t s_navigation_index;
 static uint8_t s_settings_selection;
 static lv_obj_t *s_settings_note;
+// Settings shows four page rows at a time. Moving to another group rewrites
+// these rows in place instead of rebuilding (and fully repainting) the page.
+static lv_obj_t *s_settings_range;
+static lv_obj_t *s_settings_dividers[UI_DASHBOARD_SETTINGS_ROWS - 1];
 static uint8_t s_device_volume = 70;
 static uint8_t s_feedback_state;
 static navigation_view_t s_navigation;
@@ -415,11 +422,11 @@ static lv_obj_t *showcase_content_stage_create(
     return content_layer_create(root, 16, 4, 208, 204, t);
 }
 
-static void content_divider_create(lv_obj_t *parent, int y,
-                                   const ui_glass_theme_t *t)
+static lv_obj_t *content_divider_create(lv_obj_t *parent, int y,
+                                        const ui_glass_theme_t *t)
 {
-    solid_object(parent, 20, y, 168, 1, 0,
-                 t->text_muted, LV_OPA_20);
+    return solid_object(parent, 20, y, 168, 1, 0,
+                        t->text_muted, LV_OPA_20);
 }
 
 // Preserve the standard material while making accessibility modes opaque.
@@ -556,6 +563,8 @@ static void stop_scene_activity(void)
     s_devices_result_label = NULL;
     s_selection_canvas = NULL;
     s_settings_note = NULL;
+    s_settings_range = NULL;
+    memset(s_settings_dividers, 0, sizeof(s_settings_dividers));
     memset(s_focus_components, 0, sizeof(s_focus_components));
 }
 
@@ -1349,9 +1358,10 @@ static void morph_set(void *value, int32_t progress)
         lv_obj_set_style_bg_color(morph->surface, lv_color_hex(fill), 0);
         morph->last_depth = d;
     }
-    lv_obj_set_style_bg_opa(morph->surface,
-                            accessible_opacity(opacity_clamp(frame.opacity +
-                                          morph->visual_depth * 2)), 0);
+    ui_glass_set_bg_opa_if_changed(
+        morph->surface,
+        accessible_opacity(opacity_clamp(frame.opacity +
+                                         morph->visual_depth * 2)));
     if (morph->shadow) {
         // 阴影留在半透明 surface 覆盖范围内，只透出纵深，不再把等大圆角轮廓
         // 向下探出菜单外缘；否则展开态会被读成 Quick Actions 的第二重边。
@@ -1376,24 +1386,22 @@ static void morph_set(void *value, int32_t progress)
                                : (uint8_t)(255 -
                                    opacity_from_range(progress, 100, 500));
     uint8_t button_opacity = (uint8_t)(255 - menu_opacity);
-    lv_obj_set_style_opa(morph->menu, menu_opacity, 0);
-    lv_obj_set_style_opa(morph->button_label, button_opacity, 0);
-    if (morph->dimmer) {
-        // Keep only a slight atmospheric separation. Semantic content fades
-        // independently below, so the wallpaper can remain optically active.
-        lv_obj_set_style_bg_opa(
-            morph->dimmer,
-            (lv_opa_t)(openness * 36 / UI_GLASS_MOTION_PROGRESS_MAX), 0);
-    }
+    // These opacities sit at 0 or 255 for most of the motion; an unchanged
+    // write would still redraw the whole menu or content every frame.
+    ui_glass_set_opa_if_changed(morph->menu, menu_opacity);
+    ui_glass_set_opa_if_changed(morph->button_label, button_opacity);
+    // The full-screen dimmer is deliberately not animated here: every opacity
+    // step repainted all 76,800 pixels on every frame of the morph. It only
+    // changes at rest in morph_finish(), whose full-screen redraw already
+    // restores the optics, so the resting looks are unchanged.
     if (morph->context) {
         // The content is fully gone before the menu becomes readable and only
         // returns after the closing menu is nearly gone. A linear crossfade
         // put both titles near 50% at the midpoint and produced visible text
         // collisions even though the geometry itself was continuous.
-        lv_obj_set_style_opa(
+        ui_glass_set_opa_if_changed(
             morph->context,
-            (lv_opa_t)(255 - opacity_from_range(
-                openness, 80, 240)), 0);
+            (lv_opa_t)(255 - opacity_from_range(openness, 80, 240)));
     }
 }
 
@@ -1418,6 +1426,14 @@ static void morph_finish(morph_view_t *morph)
         reference_glass_apply(morph->surface, morph->base_tint,
                               morph->to.opacity, morph->visual_depth);
         ui_glass_surface_set_glint(morph->surface, UI_GLASS_GLINT_HIDDEN);
+    }
+    if (morph->dimmer) {
+        // The dimmer only follows the resting state (see morph_set()). The
+        // full-screen invalidation below repaints it, so switching it here
+        // costs no additional redraw.
+        ui_glass_set_bg_opa_if_changed(
+            morph->dimmer,
+            morph->open ? PLAYER_DIMMER_OPA : LV_OPA_TRANSP);
     }
     // 恢复动画期间被抑制的光学边，并整屏失效重绘一次干净的静止态。
     ui_glass_set_optics_suppressed(false);
@@ -1473,7 +1489,10 @@ static void build_overlays(lv_obj_t *root)
 {
     const ui_glass_theme_t *t = theme();
     lv_obj_t *scene = lv_obj_get_parent(root);
-    lv_obj_t *content = content_layer_create(root, 14, 6, 212, 252, t);
+    // 216 px is exactly the cards plus the status line (bottom at 213). The
+    // Quick Actions morph fades this container, and LVGL redraws the whole
+    // container box, so extra empty height is repainted on every fade frame.
+    lv_obj_t *content = content_layer_create(root, 14, 6, 212, 216, t);
     s_morph.context = content;
     // 信息卡加高到 92 收纳右上角圆形快捷按钮；曲名下移到按钮下方避开遮挡。
     solid_object(content, 0, 8, 212, 92, UI_GLASS_RADIUS_PANEL,
@@ -1670,7 +1689,11 @@ static void navigation_content_update(uint8_t index)
 static void navigation_content_create(lv_obj_t *panel,
                                       const ui_glass_theme_t *t)
 {
-    s_navigation.content = plain_object(panel, 0, 0, 212, 252);
+    // Sized to the title card and hero (bottom at 152), not to the panel. A
+    // dock change slides and fades this container every frame and LVGL
+    // redraws its whole box, so the old 252 px height repainted the empty
+    // band and the glass dock under it on every frame.
+    s_navigation.content = plain_object(panel, 0, 0, 212, 152);
     // 标题卡与 hero 用满 content 的 212 宽，与下方 dock / footer 左右对齐
     // （三者绝对范围都是 14..226）。缩进会让上下两组差 16px，肉眼很明显。
     solid_object(s_navigation.content, 0, 8, 212, 60,
@@ -2043,33 +2066,59 @@ static void settings_status_refresh(void)
     }
 }
 
+// Writes the group that contains s_settings_selection into the four fixed row
+// objects and re-binds the focus lens. Crossing a group boundary used to
+// rebuild the whole page, which also repainted the entire screen; rewriting
+// rows only redraws what changed. Unused rows (the last group has two) and
+// the dividers after the last row are hidden, which matches the old layout.
+static void settings_rows_update(lv_obj_t *lens)
+{
+    const ui_glass_theme_t *t = theme();
+    uint8_t first = ui_dashboard_settings_first(s_settings_selection);
+    uint8_t count = PAGE_SETTINGS - first;
+    if (count > UI_DASHBOARD_SETTINGS_ROWS) count = UI_DASHBOARD_SETTINGS_ROWS;
+    set_label_text_fmt(s_settings_range, "Show pages  %u-%u / %u",
+                       first + 1u, first + count, (unsigned)PAGE_SETTINGS);
+    uint16_t mask = dashboard_preferences_pages();
+    for (uint8_t i = 0; i < UI_DASHBOARD_SETTINGS_ROWS; ++i) {
+        ui_glass_component_t *row = &s_focus_components[i];
+        bool shown = i < count;
+        ui_glass_set_hidden_if_changed(row->root, !shown);
+        if (i + 1u < UI_DASHBOARD_SETTINGS_ROWS) {
+            ui_glass_set_hidden_if_changed(s_settings_dividers[i],
+                                           i + 1u >= count);
+        }
+        if (!shown) continue;
+        showcase_page_t page = UI_DASHBOARD_PAGE_ORDER[first + i];
+        set_label_text(row->label, page == SHOWCASE_NAVIGATION
+                                       ? "Home (always on)"
+                                       : PAGE_TITLES[page]);
+        showcase_choice_set(row, ui_dashboard_page_visible(mask, page), t);
+    }
+    focus_bind(lens, count, s_settings_selection - first);
+}
+
 static void build_settings(lv_obj_t *root)
 {
     const ui_glass_theme_t *t = theme();
     lv_obj_t *stage = showcase_content_stage_create(root, t);
-    uint8_t first = ui_dashboard_settings_first(s_settings_selection);
-    uint8_t count = PAGE_SETTINGS - first;
-    if (count > UI_DASHBOARD_SETTINGS_ROWS) count = UI_DASHBOARD_SETTINGS_ROWS;
-    lv_obj_t *range = text_at(stage, "", 14, 0, &lv_font_montserrat_14,
-                              t->text_muted);
-    lv_label_set_text_fmt(range, "Show pages  %u-%u / %u",
-                          first + 1u, first + count, (unsigned)PAGE_SETTINGS);
+    s_settings_range = text_at(stage, "", 14, 0, &lv_font_montserrat_14,
+                               t->text_muted);
     lv_obj_t *lens = ui_glass_focus_lens_create(stage, 6, 22, 196, 42, t);
-    uint16_t mask = dashboard_preferences_pages();
-    for (uint8_t i = 0; i < count; ++i) {
-        showcase_page_t page = UI_DASHBOARD_PAGE_ORDER[first + i];
+    for (uint8_t i = 0; i < UI_DASHBOARD_SETTINGS_ROWS; ++i) {
         // 行距 43（原 42）：原 42 使相邻透镜首尾相接，分割线只能落在上一行
         // 透镜的底边外环扫描行上（y+41）。多出的 1px 让发丝线独占两条外环
         // 之间的扫描行（y+42），与上下外环各相距 1px、不再与外环重合。
         s_focus_y[i] = 22 + i * 43;
         s_focus_h[i] = 42;
         s_focus_components[i] = showcase_choice_create(
-            stage, s_focus_y[i],
-            page == SHOWCASE_NAVIGATION ? "Home (always on)" : PAGE_TITLES[page],
-            ui_dashboard_page_visible(mask, page), false, t);
-        if (i + 1u < count) content_divider_create(stage, s_focus_y[i] + 42, t);
+            stage, s_focus_y[i], "", false, false, t);
+        if (i + 1u < UI_DASHBOARD_SETTINGS_ROWS) {
+            s_settings_dividers[i] =
+                content_divider_create(stage, s_focus_y[i] + 42, t);
+        }
     }
-    focus_bind(lens, count, s_settings_selection - first);
+    settings_rows_update(lens);
     s_settings_note = text_at(root, "", 28, 206,
                               &lv_font_montserrat_14, t->text_muted);
     lv_obj_set_size(s_settings_note, 184, lv_font_montserrat_14.line_height);
@@ -3044,10 +3093,9 @@ static void scene_step_direction(int8_t delta)
         s_settings_selection = ui_dashboard_card_next(
             s_settings_selection, PAGE_SETTINGS, delta);
         if (first != ui_dashboard_settings_first(s_settings_selection)) {
-            uint32_t hint = s_mode_hint_ms;
-            rebuild_page();
-            s_mode_hint_ms = hint;
-            shell_refresh();
+            // Next/previous group: rewrite the rows in place (the lens jumps,
+            // as it did when the page was rebuilt) and keep the chrome as is.
+            settings_rows_update(s_focus_lens);
         } else {
             focus_move(delta);
         }
