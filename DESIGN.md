@@ -170,14 +170,18 @@ quality controller with hysteresis:
 
 | Quality | Refresh period | Animated glass limit | Glint |
 | --- | ---: | ---: | --- |
-| Full | 10 ms | 6 | enabled |
-| Balanced | 16 ms | 3 | enabled |
+| Full | 16 ms | 6 | enabled |
+| Balanced | 25 ms | 3 | enabled |
 | Economy | 33 ms | 1 | disabled |
 
-Three consecutive slow samples may reduce quality; six fast samples are needed
-to restore it. One full-screen transition cannot permanently downgrade the UI.
-The BSP publishes one-second snapshots for update rate, CPU render time, DMA
-wait, SPI wire-time floor, updated pixels, invalidation requests, and DMA heap.
+The refresh period also paces LVGL's animation timer, so it is the real motion
+cadence: about 60, 40, and 30 frames per second. Page transitions lock Economy
+while they run. The dashboard feeds each one-second BSP sample (average submit
+time and pixels per update) to the controller. Three consecutive slow samples
+may reduce quality; six fast samples are needed to restore it. One full-screen
+transition cannot permanently downgrade the UI. The BSP publishes one-second
+snapshots for update rate, CPU render time, DMA wait, SPI wire-time floor,
+updated pixels, invalidation requests, and DMA heap.
 
 The compositor decodes the indexed (LGP8) wallpaper straight into LVGL's draw
 buffer, one palette lookup per pixel. Full-bleed content canvases are drawn in

@@ -144,13 +144,15 @@ Runtime 管理壁纸合成器、语义 Mode、刷新 Timer，以及带迟滞的�
 
 | Quality | 刷新周期 | 动态玻璃上限 | Glint |
 | --- | ---: | ---: | --- |
-| Full | 10 ms | 6 | 开启 |
-| Balanced | 16 ms | 3 | 开启 |
+| Full | 16 ms | 6 | 开启 |
+| Balanced | 25 ms | 3 | 开启 |
 | Economy | 33 ms | 1 | 关闭 |
 
-连续三次慢采样才允许降级，连续六次快采样才恢复，因此一次全屏过渡不会永久降低质量。
-BSP 每秒提供 Update Rate、CPU Render、DMA Wait、SPI Wire-Time Floor、更新像素、
-Invalidation 请求和 DMA Heap 快照。
+刷新周期同时决定 LVGL 动画 Timer 的周期，因此就是实际的动效节奏：约每秒 60、40、30 帧。
+页面转场期间锁定为 Economy。Dashboard 把 BSP 每秒一次的采样（平均 Submit 时间与每次
+更新像素数）送入质量控制器。连续三次慢采样才允许降级，连续六次快采样才恢复，因此一次
+全屏过渡不会永久降低质量。BSP 每秒提供 Update Rate、CPU Render、DMA Wait、
+SPI Wire-Time Floor、更新像素、Invalidation 请求和 DMA Heap 快照。
 
 合成器把索引色（LGP8）壁纸逐行解码、直接写入 LVGL 绘制缓冲区，每像素一次调色板查表。
 全屏内容画布在同一遍中绘制：用预先着色的调色板副本解码，压暗后的壁纸不再需要逐像素

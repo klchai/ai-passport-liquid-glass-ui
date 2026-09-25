@@ -225,6 +225,8 @@ static uint32_t s_step_elapsed_ms;
 static bool s_tour_killed;          // 任何按键永久停止无人巡航
 static bool s_scene_done;           // 当前场景的步进演示已跑完
 static page_transition_t s_page_motion;
+// The last one-second display sample fed to the adaptive quality controller.
+static uint32_t s_perf_sequence;
 
 // ---- 实时数据页（Kaboo / Claude）状态 ----
 
@@ -2863,10 +2865,29 @@ static void link_dot_refresh(void)
         s_link_dot, usage_link_connected() ? t->positive : t->text_muted);
 }
 
+// Feeds each new one-second display sample to the adaptive quality
+// controller. Samples that arrive while a page transition locks the tier are
+// dropped; the controller's hysteresis absorbs the rest of a transition.
+static void quality_observe_display(void)
+{
+    bsp_display_perf_snapshot_t perf;
+    if (!bsp_display_perf_get(&perf) ||
+        perf.sample_sequence == s_perf_sequence) {
+        return;
+    }
+    s_perf_sequence = perf.sample_sequence;
+    uint16_t submit_ms_x10 = perf.submit_avg_ms_x10 > UINT16_MAX
+                                 ? UINT16_MAX
+                                 : (uint16_t)perf.submit_avg_ms_x10;
+    ui_glass_runtime_observe(&s_runtime, submit_ms_x10,
+                             perf.pixels_per_update);
+}
+
 // 单一主定时器：巡航、场景步进、Kaboo 轮换、BLE 刷新全在这里按各自计数器推进。
 static void master_tick(lv_timer_t *timer)
 {
     (void)timer;
+    quality_observe_display();
     // 链路点在转场期间也要刷，它不属于任何 scene。
     link_dot_refresh();
     int battery = atomic_load(&s_battery_soc);
@@ -3052,6 +3073,9 @@ void dashboard_enter(void)
                                UI_GLASS_QUALITY_FULL)) {
         return;
     }
+    // Only samples rendered by the dashboard itself count toward quality.
+    bsp_display_perf_snapshot_t perf;
+    s_perf_sequence = bsp_display_perf_get(&perf) ? perf.sample_sequence : 0;
     const ui_glass_theme_t *t = theme();
     // Created before the chrome so every scene placed in it stays below the
     // header and footer without ever reordering the screen's children.
