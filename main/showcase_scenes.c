@@ -34,6 +34,7 @@
 #include "lvgl.h"
 
 #include <inttypes.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 
@@ -186,6 +187,11 @@ static const uint8_t SHOWCASE_BRIGHTNESS_LEVELS[] = {
 };
 
 static ui_glass_runtime_t s_runtime;
+// Every page scene is created inside this transparent host, which sits below
+// the header and footer in the screen's child order. Reordering children with
+// lv_obj_move_foreground() invalidates the whole parent, so keeping the scenes
+// under a fixed host means the chrome never has to be moved above a new scene.
+static lv_obj_t *s_scene_host;
 static lv_obj_t *s_scene;
 static lv_obj_t *s_header_chrome;
 static lv_obj_t *s_header_title;
@@ -335,9 +341,28 @@ static const ui_glass_theme_t *theme(void)
     return ui_glass_runtime_theme(&s_runtime);
 }
 
+// Label colors are re-applied by shared refresh paths (shell, tabs, menus,
+// data pages); an unchanged color must not redraw the label.
 static void set_label_color(lv_obj_t *label, uint32_t color)
 {
-    if (label) lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
+    ui_glass_set_text_color_if_changed(label, color);
+}
+
+static void set_label_text(lv_obj_t *label, const char *text)
+{
+    ui_glass_set_label_text_if_changed(label, text);
+}
+
+static void set_label_text_fmt(lv_obj_t *label, const char *format, ...)
+    __attribute__((format(printf, 2, 3)));
+static void set_label_text_fmt(lv_obj_t *label, const char *format, ...)
+{
+    char text[48];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(text, sizeof(text), format, args);
+    va_end(args);
+    ui_glass_set_label_text_if_changed(label, text);
 }
 
 static uint8_t opacity_clamp(int value)
@@ -1000,16 +1025,11 @@ static void showcase_choice_set(ui_glass_component_t *component, bool selected,
     if (!component || !component->indicator || !component->auxiliary || !t) {
         return;
     }
-    lv_obj_set_style_bg_color(
-        component->indicator,
-        lv_color_hex(selected ? t->accent : t->text_muted), 0);
-    lv_obj_set_style_bg_opa(component->indicator,
-                            selected ? LV_OPA_COVER : LV_OPA_30, 0);
-    if (selected) {
-        lv_obj_remove_flag(component->auxiliary, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(component->auxiliary, LV_OBJ_FLAG_HIDDEN);
-    }
+    ui_glass_set_bg_color_if_changed(component->indicator,
+                                     selected ? t->accent : t->text_muted);
+    ui_glass_set_bg_opa_if_changed(component->indicator,
+                                   selected ? LV_OPA_COVER : LV_OPA_30);
+    ui_glass_set_hidden_if_changed(component->auxiliary, !selected);
 }
 
 static ui_glass_component_t showcase_stepper_create(
@@ -2059,7 +2079,7 @@ static void build_settings(lv_obj_t *root)
 
 static lv_obj_t *scene_create(void)
 {
-    lv_obj_t *scene = plain_object(s_runtime.screen, 0, 0,
+    lv_obj_t *scene = plain_object(s_scene_host, 0, 0,
                                    LIQUID_GLASS_COMPOSITOR_WIDTH,
                                    LIQUID_GLASS_COMPOSITOR_HEIGHT);
     return scene;
@@ -2140,9 +2160,9 @@ static void dots_select(lv_obj_t **dots, int count, int active,
     for (int i = 0; i < count; ++i) {
         if (!dots[i]) continue;
         bool on = (i == active);
-        lv_obj_set_style_bg_color(dots[i],
-                                  lv_color_hex(on ? t->accent : t->text_muted), 0);
-        lv_obj_set_style_bg_opa(dots[i], on ? LV_OPA_COVER : LV_OPA_40, 0);
+        ui_glass_set_bg_color_if_changed(dots[i],
+                                         on ? t->accent : t->text_muted);
+        ui_glass_set_bg_opa_if_changed(dots[i], on ? LV_OPA_COVER : LV_OPA_40);
     }
 }
 
@@ -2257,16 +2277,15 @@ static bool refresh_source_note(lv_obj_t *note, uint32_t sampled_unix,
     const ui_glass_theme_t *t = theme();
     bool fresh = have_now && usage_model_source_fresh(
         sampled_unix, now_unix, SOURCE_TTL_SECONDS);
-    lv_obj_set_style_text_color(note,
-        lv_color_hex(fresh ? t->text_muted : t->warning), 0);
+    set_label_color(note, fresh ? t->text_muted : t->warning);
     if (!have_now) {
-        lv_label_set_text(note, "Update time unknown");
+        set_label_text(note, "Update time unknown");
     } else if (!fresh) {
-        lv_label_set_text(note, "Data may be stale");
+        set_label_text(note, "Data may be stale");
     } else {
         uint32_t minutes = (now_unix - sampled_unix) / 60u;
-        if (minutes == 0) lv_label_set_text(note, "Updated <1m ago");
-        else lv_label_set_text_fmt(note, "Updated %" PRIu32 "m ago", minutes);
+        if (minutes == 0) set_label_text(note, "Updated <1m ago");
+        else set_label_text_fmt(note, "Updated %" PRIu32 "m ago", minutes);
     }
     return fresh;
 }
@@ -2279,17 +2298,16 @@ static void refresh_kaboo(const usage_snapshot_t *snap, bool have)
     const ui_glass_theme_t *t = theme();
     if (!s_kaboo_view.value) return;
 
-    lv_label_set_text(s_kaboo_view.label, LABELS[s_kaboo_card]);
+    set_label_text(s_kaboo_view.label, LABELS[s_kaboo_card]);
     dots_select(s_kaboo_view.dots, KABOO_CARD_COUNT, s_kaboo_card, t);
 
     if (!have || !(snap->flags & USAGE_FLAG_KABOO_VALID)) {
-        lv_obj_set_style_text_color(s_kaboo_view.note,
-                                    lv_color_hex(t->warning), 0);
-        lv_label_set_text(s_kaboo_view.value, "--");
-        lv_label_set_text(s_kaboo_view.cost, "");
-        lv_label_set_text(s_kaboo_view.model, "--");
-        lv_label_set_text(s_kaboo_view.note,
-                          have ? "No kaboo data" : "Waiting for Mac");
+        set_label_color(s_kaboo_view.note, t->warning);
+        set_label_text(s_kaboo_view.value, "--");
+        set_label_text(s_kaboo_view.cost, "");
+        set_label_text(s_kaboo_view.model, "--");
+        set_label_text(s_kaboo_view.note,
+                       have ? "No kaboo data" : "Waiting for Mac");
         return;
     }
 
@@ -2305,11 +2323,11 @@ static void refresh_kaboo(const usage_snapshot_t *snap, bool have)
 
     char buf[32];
     format_tokens(buf, sizeof buf, tokens);
-    lv_label_set_text(s_kaboo_view.value, buf);
+    set_label_text(s_kaboo_view.value, buf);
     format_cost(buf, sizeof buf, cents);
-    lv_label_set_text(s_kaboo_view.cost, buf);
-    lv_label_set_text(s_kaboo_view.model,
-                      snap->top_model[0] ? snap->top_model : "--");
+    set_label_text(s_kaboo_view.cost, buf);
+    set_label_text(s_kaboo_view.model,
+                   snap->top_model[0] ? snap->top_model : "--");
 
     // 数据源过期时明确标注，而不是让旧数字冒充当前值。
     uint32_t now_unix = 0;
@@ -2317,10 +2335,8 @@ static void refresh_kaboo(const usage_snapshot_t *snap, bool have)
                                          &now_unix);
     bool fresh = refresh_source_note(s_kaboo_view.note,
                                      snap->kaboo_sampled_unix, now_unix, have_now);
-    lv_obj_set_style_text_color(s_kaboo_view.value,
-        lv_color_hex(fresh ? t->text : t->text_muted), 0);
-    lv_obj_set_style_text_color(s_kaboo_view.cost,
-        lv_color_hex(fresh ? t->accent : t->text_muted), 0);
+    set_label_color(s_kaboo_view.value, fresh ? t->text : t->text_muted);
+    set_label_color(s_kaboo_view.cost, fresh ? t->accent : t->text_muted);
 }
 
 static void refresh_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset,
@@ -2329,8 +2345,9 @@ static void refresh_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset,
 {
     const ui_glass_theme_t *t = theme();
 
-    lv_label_set_text_fmt(value, "%u%%", pct);
-    lv_obj_set_width(bar, 156 * pct / 100);   // 轨道宽 156，与 build_quota_row 一致
+    set_label_text_fmt(value, "%u%%", pct);
+    // 轨道宽 156，与 build_quota_row 一致
+    ui_glass_set_width_if_changed(bar, 156 * pct / 100);
 
     // 用量越高越接近告警色，让人一眼看出余量紧张。100% 爆额是本页最需要
     // 警示的状态，绝不能被"数据过期"洗成浅色 —— 那会让一根满额红条渲染成
@@ -2341,37 +2358,36 @@ static void refresh_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset,
     else if (pct >= 70) color = t->warning;
     bool expired = have_now && usage_model_quota_expired(resets_unix, now_unix);
     bool current = source_fresh && !expired;
-    lv_obj_set_style_text_color(value,
-        lv_color_hex(current ? t->text : t->text_muted), 0);
-    lv_obj_set_style_bg_color(bar, lv_color_hex(color), 0);
+    set_label_color(value, current ? t->text : t->text_muted);
+    ui_glass_set_bg_color_if_changed(bar, color);
     // 新鲜=实色；过期=半透明但仍是语义色，一眼分得清"满额但旧"与"当前满额"。
-    lv_obj_set_style_bg_opa(bar, current ? LV_OPA_COVER : LV_OPA_50, 0);
+    ui_glass_set_bg_opa_if_changed(bar, current ? LV_OPA_COVER : LV_OPA_50);
 
     if (!have_now) {
-        lv_label_set_text(reset, "");
+        set_label_text(reset, "");
         return;
     }
     if (expired) {
-        lv_label_set_text(reset, "Awaiting update");
+        set_label_text(reset, "Awaiting update");
         return;
     }
     char buf[40];
     format_remaining(buf, sizeof buf,
                      usage_model_seconds_until(resets_unix, now_unix));
-    lv_label_set_text(reset, buf);
+    set_label_text(reset, buf);
 }
 
 // 单个配额窗口无数据时的呈现：空轨道 + "--"，不是 0%。0% 是一个具体断言，
 // 而"这个窗口当前没有数据"是另一回事。
 static void blank_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset)
 {
-    lv_obj_set_style_text_color(value, lv_color_hex(theme()->text_muted), 0);
-    lv_label_set_text(value, "--");
-    lv_obj_set_width(bar, 0);
+    set_label_color(value, theme()->text_muted);
+    set_label_text(value, "--");
+    ui_glass_set_width_if_changed(bar, 0);
     // 复位不透明度：同一 bar 可能上一轮是过期态（LV_OPA_50），空态宽度虽为 0，
     // 但避免残留状态污染下一次 refresh_quota_row 之前的任何中间绘制。
-    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-    lv_label_set_text(reset, "not active");
+    ui_glass_set_bg_opa_if_changed(bar, LV_OPA_COVER);
+    set_label_text(reset, "not active");
 }
 
 static void refresh_claude(const usage_snapshot_t *snap, bool have)
@@ -2379,16 +2395,15 @@ static void refresh_claude(const usage_snapshot_t *snap, bool have)
     if (!s_claude_view.five_value) return;
 
     if (!have || !(snap->flags & USAGE_FLAG_CLAUDE_VALID)) {
-        lv_obj_set_style_text_color(s_claude_view.note,
-                                    lv_color_hex(theme()->warning), 0);
+        set_label_color(s_claude_view.note, theme()->warning);
         blank_quota_row(s_claude_view.five_value, s_claude_view.five_bar,
                         s_claude_view.five_reset);
         blank_quota_row(s_claude_view.seven_value, s_claude_view.seven_bar,
                         s_claude_view.seven_reset);
-        lv_label_set_text(s_claude_view.five_reset, "");
-        lv_label_set_text(s_claude_view.seven_reset, "");
-        lv_label_set_text(s_claude_view.note,
-                          have ? "No quota data" : "Waiting for Mac");
+        set_label_text(s_claude_view.five_reset, "");
+        set_label_text(s_claude_view.seven_reset, "");
+        set_label_text(s_claude_view.note,
+                       have ? "No quota data" : "Waiting for Mac");
         return;
     }
 
@@ -2498,49 +2513,47 @@ static void scene_build(showcase_page_t page, lv_obj_t *root)
 
 static void shell_refresh(void)
 {
+    // Called on page changes, mode toggles, hint expiry and Settings edits.
+    // Every write below compares first: the header and footer are persistent,
+    // so only the text that actually changed is redrawn.
     const ui_glass_theme_t *t = theme();
     uint16_t mask = dashboard_preferences_pages();
     // Keep the entire title slot for the page name; mode lives in the footer.
-    lv_label_set_text(s_header_title, PAGE_TITLES[s_page]);
+    set_label_text(s_header_title, PAGE_TITLES[s_page]);
     set_label_color(s_header_title, s_scene_mode ? t->accent : t->text);
     showcase_page_t left = ui_dashboard_page_next(mask, s_page, -1);
     showcase_page_t right = ui_dashboard_page_next(mask, s_page, 1);
     if (s_mode_hint_ms && page_has_scene_interaction(s_page)) {
-        lv_label_set_text(s_footer_label,
-                          s_scene_mode ? "Hold OK: exit controls"
-                                       : "Hold OK: enter controls");
+        set_label_text(s_footer_label,
+                       s_scene_mode ? "Hold OK: exit controls"
+                                    : "Hold OK: enter controls");
     } else if (s_scene_mode) {
         if (s_page == SHOWCASE_ADJUSTMENTS) {
-            lv_label_set_text(s_footer_label,
-                              LV_SYMBOL_UP LV_SYMBOL_DOWN " adjust   OK next");
+            set_label_text(s_footer_label,
+                           LV_SYMBOL_UP LV_SYMBOL_DOWN " adjust   OK next");
         } else if (s_page == PAGE_SETTINGS) {
-            lv_label_set_text(s_footer_label, LV_SYMBOL_UP LV_SYMBOL_DOWN " move   OK show/hide");
+            set_label_text(s_footer_label,
+                           LV_SYMBOL_UP LV_SYMBOL_DOWN " move   OK show/hide");
         } else if (s_page == PAGE_KABOO) {
-            lv_label_set_text(s_footer_label,
-                              LV_SYMBOL_UP LV_SYMBOL_DOWN " cards   OK next");
+            set_label_text(s_footer_label,
+                           LV_SYMBOL_UP LV_SYMBOL_DOWN " cards   OK next");
         } else {
-            lv_label_set_text(s_footer_label,
-                              LV_SYMBOL_UP LV_SYMBOL_DOWN "  move    OK  use");
+            set_label_text(s_footer_label,
+                           LV_SYMBOL_UP LV_SYMBOL_DOWN "  move    OK  use");
         }
     } else if (left == s_page && right == s_page) {
-        lv_label_set_text(s_footer_label, "OK: choose pages");
+        set_label_text(s_footer_label, "OK: choose pages");
     } else {
-        lv_label_set_text_fmt(s_footer_left, LV_SYMBOL_LEFT " %s",
-                              footer_page_title(left));
-        lv_label_set_text_fmt(s_footer_right, "%s " LV_SYMBOL_RIGHT,
-                              footer_page_title(right));
+        set_label_text_fmt(s_footer_left, LV_SYMBOL_LEFT " %s",
+                           footer_page_title(left));
+        set_label_text_fmt(s_footer_right, "%s " LV_SYMBOL_RIGHT,
+                           footer_page_title(right));
     }
     bool show_hint = s_scene_mode || (left == s_page && right == s_page) ||
                      (s_mode_hint_ms && page_has_scene_interaction(s_page));
-    if (show_hint) {
-        lv_obj_remove_flag(s_footer_label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_footer_left, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_footer_right, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        lv_obj_add_flag(s_footer_label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(s_footer_left, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(s_footer_right, LV_OBJ_FLAG_HIDDEN);
-    }
+    ui_glass_set_hidden_if_changed(s_footer_label, !show_hint);
+    ui_glass_set_hidden_if_changed(s_footer_left, show_hint);
+    ui_glass_set_hidden_if_changed(s_footer_right, show_hint);
     set_label_color(s_footer_left, t->text_muted);
     set_label_color(s_footer_right, t->text_muted);
     set_label_color(s_footer_label, t->text_muted);
@@ -2551,13 +2564,11 @@ static void shell_refresh(void)
         s_footer, s_page == SHOWCASE_NAVIGATION ? t->focus_edge_strength / 2
                                                : t->focus_edge_strength);
     // 导航条在每一页都可见：它现在承担导航信息，不再只是动作提示。
-    lv_obj_remove_flag(s_footer, LV_OBJ_FLAG_HIDDEN);
+    ui_glass_set_hidden_if_changed(s_footer, false);
     link_dot_refresh();
-    // Scenes are replaced throughout the reel, while the header and footer are
-    // persistent chrome. Keeping title and battery under one parent makes
-    // their clipping and Z order atomic across a translating page scene.
-    lv_obj_move_foreground(s_header_chrome);
-    lv_obj_move_foreground(s_footer);
+    // No z-order work here: scenes live inside s_scene_host, which is below
+    // the header and footer, so the chrome always stays on top. Reordering
+    // (lv_obj_move_foreground) would invalidate the whole screen each time.
     // Text changes invalidate intrinsic label sizes. Resolve aligned chrome in
     // the same frame so the first post-transition render cannot use the old
     // footer width or temporarily omit the updated battery glyphs.
@@ -2687,11 +2698,9 @@ static void show_page(showcase_page_t page, int8_t direction, bool animate)
     s_scene = incoming;
     scene_build(page, incoming);
 
-    // The incoming scene is created after the persistent chrome and would
-    // otherwise sit above it until the transition-complete callback runs.
-    // Keep status and command chrome stable for every intermediate frame.
-    lv_obj_move_foreground(s_header_chrome);
-    lv_obj_move_foreground(s_footer);
+    // The incoming scene is a child of s_scene_host, which sits below the
+    // header and footer, so the chrome stays on top for every intermediate
+    // frame without reordering (and repainting) the screen.
 
     uint16_t duration = ui_glass_motion_duration(
         s_runtime.mode, UI_GLASS_MOTION_PAGE);
@@ -2745,9 +2754,11 @@ static void link_dot_refresh(void)
 {
     if (!s_link_dot) return;
     const ui_glass_theme_t *t = theme();
-    lv_obj_set_style_bg_color(
-        s_link_dot,
-        lv_color_hex(usage_link_connected() ? t->positive : t->text_muted), 0);
+    // Runs on every 200 ms tick. Only a real connect/disconnect (or theme
+    // change) may redraw the dot; an unconditional write refreshed the display
+    // five times a second on every idle page.
+    ui_glass_set_bg_color_if_changed(
+        s_link_dot, usage_link_connected() ? t->positive : t->text_muted);
 }
 
 // 单一主定时器：巡航、场景步进、Kaboo 轮换、BLE 刷新全在这里按各自计数器推进。
@@ -2939,6 +2950,11 @@ void dashboard_enter(void)
         return;
     }
     const ui_glass_theme_t *t = theme();
+    // Created before the chrome so every scene placed in it stays below the
+    // header and footer without ever reordering the screen's children.
+    s_scene_host = plain_object(
+        s_runtime.screen, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH,
+        LIQUID_GLASS_COMPOSITOR_HEIGHT);
     s_header_chrome = plain_object(
         s_runtime.screen, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH,
         SHOWCASE_SCENE_Y);
@@ -3004,6 +3020,7 @@ void dashboard_exit(void)
     s_transitioning = false;
     ui_glass_set_optics_suppressed(false);
     ui_glass_runtime_deinit(&s_runtime);
+    s_scene_host = NULL;
     s_scene = NULL;
     s_header_chrome = NULL;
     s_header_title = NULL;

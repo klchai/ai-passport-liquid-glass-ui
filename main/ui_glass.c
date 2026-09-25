@@ -1,5 +1,7 @@
 #include "ui_glass.h"
 
+#include <string.h>
+
 typedef struct {
     int16_t radius;
     int16_t glint_progress;
@@ -249,6 +251,16 @@ void ui_glass_surface_set_tint(lv_obj_t *surface, uint32_t tint,
 {
     if (!surface) return;
     ui_glass_surface_state_t *state = lv_obj_get_user_data(surface);
+    // The shell re-applies the footer tint on every refresh. Compare the
+    // styles that are actually drawn (the Player morph writes bg_color and
+    // bg_opa directly) plus the rim's tint, and skip the full-surface
+    // invalidation when nothing changed.
+    if (lv_color_eq(lv_obj_get_style_bg_color(surface, LV_PART_MAIN),
+                    lv_color_hex(tint)) &&
+        lv_obj_get_style_bg_opa(surface, LV_PART_MAIN) == opacity &&
+        (!state || state->tint == tint)) {
+        return;
+    }
     if (state) state->tint = tint;
     lv_obj_set_style_bg_color(surface, lv_color_hex(tint), 0);
     lv_obj_set_style_bg_opa(surface, opacity, 0);
@@ -319,4 +331,76 @@ lv_obj_t *ui_glass_label(lv_obj_t *parent, const char *text,
     lv_obj_set_style_text_font(label, font, 0);
     lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
     return label;
+}
+
+bool ui_glass_set_bg_color_if_changed(lv_obj_t *object, uint32_t color)
+{
+    if (!object) return false;
+    lv_color_t value = lv_color_hex(color);
+    if (lv_color_eq(lv_obj_get_style_bg_color(object, LV_PART_MAIN), value)) {
+        return false;
+    }
+    lv_obj_set_style_bg_color(object, value, 0);
+    return true;
+}
+
+bool ui_glass_set_bg_opa_if_changed(lv_obj_t *object, lv_opa_t opa)
+{
+    if (!object || lv_obj_get_style_bg_opa(object, LV_PART_MAIN) == opa) {
+        return false;
+    }
+    lv_obj_set_style_bg_opa(object, opa, 0);
+    return true;
+}
+
+bool ui_glass_set_opa_if_changed(lv_obj_t *object, lv_opa_t opa)
+{
+    if (!object || lv_obj_get_style_opa(object, LV_PART_MAIN) == opa) {
+        return false;
+    }
+    lv_obj_set_style_opa(object, opa, 0);
+    return true;
+}
+
+bool ui_glass_set_text_color_if_changed(lv_obj_t *object, uint32_t color)
+{
+    if (!object) return false;
+    lv_color_t value = lv_color_hex(color);
+    if (lv_color_eq(lv_obj_get_style_text_color(object, LV_PART_MAIN),
+                    value)) {
+        return false;
+    }
+    lv_obj_set_style_text_color(object, value, 0);
+    return true;
+}
+
+bool ui_glass_set_width_if_changed(lv_obj_t *object, int32_t width)
+{
+    if (!object || lv_obj_get_style_width(object, LV_PART_MAIN) == width) {
+        return false;
+    }
+    lv_obj_set_width(object, width);
+    return true;
+}
+
+bool ui_glass_set_label_text_if_changed(lv_obj_t *label, const char *text)
+{
+    if (!label || !text) return false;
+    const char *current = lv_label_get_text(label);
+    if (current && strcmp(current, text) == 0) return false;
+    lv_label_set_text(label, text);
+    return true;
+}
+
+bool ui_glass_set_hidden_if_changed(lv_obj_t *object, bool hidden)
+{
+    if (!object || lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN) == hidden) {
+        return false;
+    }
+    if (hidden) {
+        lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_remove_flag(object, LV_OBJ_FLAG_HIDDEN);
+    }
+    return true;
 }

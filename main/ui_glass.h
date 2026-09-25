@@ -2,6 +2,7 @@
 
 #include "lvgl.h"
 #include "ui_glass_optics.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 #define UI_GLASS_BG_TOP       0x071018
@@ -58,3 +59,17 @@ void ui_glass_surface_set_glint(lv_obj_t *surface, int32_t progress);
 // Creates unboxed text with the shared typography and foreground treatment.
 lv_obj_t *ui_glass_label(lv_obj_t *parent, const char *text,
                          const lv_font_t *font, uint32_t color);
+
+// LVGL 9.5 invalidates an object on every style write, even when the value
+// does not change: lv_obj_set_local_style_prop() has no equality check and
+// lv_obj_refresh_style() always redraws. Periodic refresh paths (the 200 ms
+// master tick, focus restyling, BLE snapshots) use these setters so an
+// unchanged value costs no redraw. Each returns true when it wrote a value.
+bool ui_glass_set_bg_color_if_changed(lv_obj_t *object, uint32_t color);
+bool ui_glass_set_bg_opa_if_changed(lv_obj_t *object, lv_opa_t opa);
+bool ui_glass_set_opa_if_changed(lv_obj_t *object, lv_opa_t opa);
+bool ui_glass_set_text_color_if_changed(lv_obj_t *object, uint32_t color);
+bool ui_glass_set_width_if_changed(lv_obj_t *object, int32_t width);
+bool ui_glass_set_label_text_if_changed(lv_obj_t *label, const char *text);
+// Removing LV_OBJ_FLAG_HIDDEN from an already visible object still redraws it.
+bool ui_glass_set_hidden_if_changed(lv_obj_t *object, bool hidden);

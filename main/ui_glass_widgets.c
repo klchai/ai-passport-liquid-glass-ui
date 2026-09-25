@@ -277,12 +277,19 @@ void ui_glass_component_set_state(ui_glass_component_t *component,
         break;
     }
 
-    lv_obj_set_style_transform_width(component->root, transform, 0);
-    lv_obj_set_style_transform_height(component->root, transform, 0);
-    lv_obj_set_style_opa(component->root, opacity, 0);
-    if (component->label) {
-        lv_obj_set_style_text_color(component->label, lv_color_hex(color), 0);
+    // Focus changes restyle every row of a page, but only two rows actually
+    // change state. Writing the unchanged ones would redraw each whole row
+    // (LVGL invalidates on every style write), so compare first.
+    if (lv_obj_get_style_transform_width(component->root, LV_PART_MAIN) !=
+        transform) {
+        lv_obj_set_style_transform_width(component->root, transform, 0);
     }
+    if (lv_obj_get_style_transform_height(component->root, LV_PART_MAIN) !=
+        transform) {
+        lv_obj_set_style_transform_height(component->root, transform, 0);
+    }
+    ui_glass_set_opa_if_changed(component->root, opacity);
+    ui_glass_set_text_color_if_changed(component->label, color);
 }
 
 void ui_glass_toggle_set(ui_glass_component_t *component, bool enabled,
