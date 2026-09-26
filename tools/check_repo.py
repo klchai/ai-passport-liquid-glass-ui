@@ -19,6 +19,41 @@ SECRET_PATTERNS = {
     "AWS access key": re.compile(r"AKIA[0-9A-Z]{16}"),
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
 }
+RADIUS_CALL_RE = re.compile(
+    r"\b(solid_object|reference_glass_create|ui_glass_surface_create)\s*\("
+)
+# A C function definition at column 0: return type, name, parameter list, "{".
+FUNCTION_HEADER_RE = re.compile(
+    r"(?m)^(?:static\s+)?[\w\s\*]+?\b(\w+)\s*\(([^;{}]*?)\)\s*\{"
+)
+STYLE_RADIUS_RE = re.compile(r"\blv_obj_set_style_radius\s*\(")
+# The one sanctioned non-token radius argument: (file, enclosing function,
+# callee, argument). reference_glass_create() is the design-system wrapper
+# that forwards its own `radius` parameter into the glass surface it builds.
+# Any other helper, a reassigned parameter, or a wrapper called with a literal
+# has to spell a token at the call site.
+FORWARDED_RADIUS_CALLS = {
+    ("showcase_scenes.c", "reference_glass_create", "ui_glass_surface_create", "radius"),
+}
+ALLOWED_RADIUS_ARGS = {
+    "0",
+    "LV_RADIUS_CIRCLE",
+    "UI_GLASS_RADIUS_CONTROL",
+    "UI_GLASS_RADIUS_PANEL",
+    "UI_GLASS_RADIUS_FLOATING",
+}
+COMPACT_RADIUS_DEFINITIONS = {
+    "SHOWCASE_RADIUS_CHECKBOX_OUTER": "6",
+    "SHOWCASE_RADIUS_CHECKBOX_INNER": "3",
+}
+COMPACT_RADIUS_CALLS = {
+    "SHOWCASE_RADIUS_CHECKBOX_OUTER": (
+        "component.root", "14", "10", "22", "22",
+    ),
+    "SHOWCASE_RADIUS_CHECKBOX_INNER": (
+        "mark", "5", "5", "12", "12",
+    ),
+}
 
 
 def git_files() -> list[Path]:
@@ -179,6 +214,284 @@ def check_conflict_markers(files: list[Path], errors: list[str]) -> None:
             errors.append(f"{path.relative_to(ROOT)}: unresolved merge conflict marker")
 
 
+def split_call_args(source: str) -> list[str]:
+    args: list[str] = []
+    current: list[str] = []
+    depth = 0
+    quote = None
+    escape = False
+
+    for char in source:
+        if quote:
+            current.append(char)
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = None
+            continue
+
+        if char in ('"', "'"):
+            quote = char
+            current.append(char)
+        elif char == "(":
+            depth += 1
+            current.append(char)
+        elif char == ")":
+            depth -= 1
+            current.append(char)
+        elif char == "," and depth == 0:
+            args.append(" ".join("".join(current).split()))
+            current = []
+        else:
+            current.append(char)
+
+    if current or source.strip():
+        args.append(" ".join("".join(current).split()))
+    return args
+
+
+def mask_c_comments_and_literals(source: str) -> str:
+    """Replace C comments and quoted literals with spaces, preserving offsets."""
+    masked = list(source)
+    index = 0
+    while index < len(source):
+        if source.startswith("//", index):
+            end = source.find("\n", index + 2)
+            if end < 0:
+                end = len(source)
+            for position in range(index, end):
+                masked[position] = " "
+            index = end
+            continue
+        if source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            end = len(source) if end < 0 else end + 2
+            for position in range(index, end):
+                if source[position] != "\n":
+                    masked[position] = " "
+            index = end
+            continue
+        if source[index] in ('"', "'"):
+            quote = source[index]
+            masked[index] = " "
+            index += 1
+            escape = False
+            while index < len(source):
+                char = source[index]
+                if char != "\n":
+                    masked[index] = " "
+                index += 1
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == quote:
+                    break
+            continue
+        index += 1
+    return "".join(masked)
+
+
+def find_matching_paren(source: str, open_index: int) -> int:
+    depth = 0
+    quote = None
+    escape = False
+    index = open_index
+    while index < len(source):
+        char = source[index]
+        if quote:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == quote:
+                quote = None
+        elif char in ('"', "'"):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return -1
+
+
+def allowed_radius_arg(argument: str) -> bool:
+    return argument in ALLOWED_RADIUS_ARGS
+
+
+def find_matching_brace(code: str, open_index: int) -> int:
+    depth = 0
+    for index in range(open_index, len(code)):
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
+
+
+def enclosing_function(
+    code: str, index: int
+) -> tuple[str, set[str], str] | None:
+    """(name, parameter names, body) of the function whose body holds `index`.
+
+    The candidate is the last column-0 definition before `index`; it only
+    counts if `index` lies inside that definition's brace block, so a call at
+    file scope after a function does not inherit its parameters.
+    """
+    header = None
+    for candidate in FUNCTION_HEADER_RE.finditer(code, 0, index):
+        header = candidate
+    if header is None:
+        return None
+    body_open = header.end() - 1
+    body_close = find_matching_brace(code, body_open)
+    if body_close < index:
+        return None
+    names: set[str] = set()
+    for parameter in header.group(2).split(","):
+        parameter = parameter.strip()
+        if not parameter or parameter == "void":
+            continue
+        names.add(re.split(r"[\s\*]+", parameter)[-1].strip("[]"))
+    return header.group(1), names, code[body_open + 1 : body_close]
+
+
+def assigns_name(body: str, name: str) -> bool:
+    """True if `body` writes to the plain variable `name` (not a member)."""
+    escaped = re.escape(name)
+    written = rf"(?<![\w.>]){escaped}\s*(?:[-+*/%&|^]|<<|>>)?=(?!=)"
+    stepped = rf"(?:\+\+|--)\s*(?<![\w.>]){escaped}\b|(?<![\w.>]){escaped}\s*(?:\+\+|--)"
+    return re.search(written, body) is not None or re.search(stepped, body) is not None
+
+
+def allowed_forwarded_radius(
+    path: Path, callee: str, radius: str, code: str, index: int
+) -> bool:
+    enclosing = enclosing_function(code, index)
+    if enclosing is None:
+        return False
+    name, parameters, body = enclosing
+    key = (path.name, name, callee, radius)
+    if key not in FORWARDED_RADIUS_CALLS or radius not in parameters:
+        return False
+    # A parameter the wrapper itself writes to is no longer a forward.
+    return not assigns_name(body, radius)
+
+
+def literal_radius(argument: str) -> int | None:
+    """The value of a bare C integer literal, or None for anything else.
+
+    Unwraps parentheses and a leading sign, accepts decimal, octal, and hex
+    with any u/l suffix, so `(17)`, `+17`, `0x11UL`, and `021` all read as 17.
+    """
+    text = argument.strip()
+    while text.startswith("(") and text.endswith(")"):
+        text = text[1:-1].strip()
+    text = text.lstrip("+-").strip()   # a signed literal is still a literal
+    match = re.fullmatch(r"(\d+|0[xX][0-9a-fA-F]+)[uUlL]{0,3}", text)
+    if not match:
+        return None
+    digits = match.group(1)
+    if digits[:2].lower() == "0x":
+        return int(digits, 16)
+    if len(digits) > 1 and digits.startswith("0"):
+        return int(digits, 8)
+    return int(digits)
+
+
+def allowed_compact_radius_call(path: Path, args: list[str]) -> bool:
+    if path.name != "showcase_scenes.c" or len(args) < 6:
+        return False
+    expected = COMPACT_RADIUS_CALLS.get(args[5])
+    return expected is not None and tuple(args[:5]) == expected
+
+
+def check_radius_tokens(errors: list[str]) -> None:
+    """Keep showcase rounded rectangles on the design-system radius tokens."""
+    radius_arg_index = {
+        "solid_object": 5,
+        "reference_glass_create": 5,
+        "ui_glass_surface_create": 5,
+    }
+    compact_uses = {name: 0 for name in COMPACT_RADIUS_CALLS}
+    for path in sorted((ROOT / "main").glob("*.c")):
+        text = path.read_text(encoding="utf-8")
+        code = mask_c_comments_and_literals(text)
+        if path.name == "showcase_scenes.c":
+            for name, expected in COMPACT_RADIUS_DEFINITIONS.items():
+                definition = re.search(
+                    rf"(?m)^\s*#define\s+{re.escape(name)}\s+(\S+)", code
+                )
+                if not definition or definition.group(1) != expected:
+                    errors.append(
+                        f"{path.relative_to(ROOT)}: {name} must remain {expected} "
+                        "until a compact design token is approved"
+                    )
+        for match in RADIUS_CALL_RE.finditer(code):
+            function = match.group(1)
+            open_index = match.end() - 1
+            close_index = find_matching_paren(code, open_index)
+            if close_index < 0:
+                line = text.count("\n", 0, match.start()) + 1
+                errors.append(
+                    f"{path.relative_to(ROOT)}:{line}: unterminated "
+                    f"{function} call"
+                )
+                continue
+            # Skip helper definitions; the next non-space token is their body.
+            if code[close_index + 1 :].lstrip().startswith("{"):
+                continue
+            args = split_call_args(code[open_index + 1 : close_index])
+            arg_index = radius_arg_index[function]
+            if len(args) <= arg_index:
+                continue
+            radius = args[arg_index]
+            compact_exception = allowed_compact_radius_call(path, args)
+            if compact_exception:
+                compact_uses[radius] += 1
+            forwarded = allowed_forwarded_radius(
+                path, function, radius, code, match.start()
+            )
+            if not (allowed_radius_arg(radius) or compact_exception or forwarded):
+                line = text.count("\n", 0, match.start()) + 1
+                errors.append(
+                    f"{path.relative_to(ROOT)}:{line}: {function} radius must "
+                    "use UI_GLASS_RADIUS_*, LV_RADIUS_CIRCLE, 0, the "
+                    "reference-glass helper's forwarded radius, or the locked "
+                    "compact-checkbox exception "
+                    f"(got {radius})"
+                )
+        # Direct style setters bypass every helper; a bare literal there is
+        # the same drift the helpers guard against.
+        for match in STYLE_RADIUS_RE.finditer(code):
+            open_index = match.end() - 1
+            close_index = find_matching_paren(code, open_index)
+            if close_index < 0:
+                continue
+            args = split_call_args(code[open_index + 1 : close_index])
+            value = literal_radius(args[1]) if len(args) >= 2 else None
+            if value:
+                line = text.count("\n", 0, match.start()) + 1
+                errors.append(
+                    f"{path.relative_to(ROOT)}:{line}: lv_obj_set_style_radius "
+                    f"takes a literal radius {args[1]}; use a UI_GLASS_RADIUS_* "
+                    "token"
+                )
+    for name, count in compact_uses.items():
+        if count != 1:
+            errors.append(
+                f"main/showcase_scenes.c: {name} must be used by exactly one "
+                f"locked checkbox call (found {count})"
+            )
+
+
 def main() -> int:
     errors: list[str] = []
     files = text_files()
@@ -189,6 +502,7 @@ def main() -> int:
     check_issue_forms(errors)
     check_sensitive_content(files, errors)
     check_conflict_markers(files, errors)
+    check_radius_tokens(errors)
 
     if errors:
         for error in errors:

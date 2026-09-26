@@ -48,6 +48,98 @@ uint16_t liquid_glass_rgb888_to_rgb565(uint32_t color)
                       ((color & 0xFFu) >> 3));
 }
 
+static uint16_t read_le16(const uint8_t *bytes)
+{
+    return (uint16_t)(bytes[0] | (uint16_t)bytes[1] << 8);
+}
+
+bool liquid_glass_indexed_image_parse(
+    const uint8_t *data, size_t size,
+    liquid_glass_indexed_image_t *image,
+    uint16_t palette[LIQUID_GLASS_PALETTE_SIZE])
+{
+    const size_t prefix = LIQUID_GLASS_INDEXED_HEADER_BYTES +
+                          LIQUID_GLASS_INDEXED_PALETTE_BYTES;
+    if (!data || !image || !palette || size < prefix ||
+        memcmp(data, "LGP8", 4) != 0) {
+        return false;
+    }
+    uint16_t width = read_le16(data + 4);
+    uint16_t height = read_le16(data + 6);
+    uint16_t colors = read_le16(data + 8);
+    if (width == 0 || height == 0 || colors == 0 ||
+        colors > LIQUID_GLASS_PALETTE_SIZE ||
+        size != prefix + (size_t)width * height) {
+        return false;
+    }
+    for (size_t index = 0; index < LIQUID_GLASS_PALETTE_SIZE; ++index) {
+        palette[index] = index < colors
+            ? read_le16(data + LIQUID_GLASS_INDEXED_HEADER_BYTES + index * 2)
+            : 0;
+    }
+    image->indices = data + prefix;
+    image->width = width;
+    image->height = height;
+    image->colors = colors;
+    return true;
+}
+
+void liquid_glass_indexed_row(const uint8_t *row_indices,
+                              const uint16_t palette[LIQUID_GLASS_PALETTE_SIZE],
+                              int16_t x1, int16_t x2, uint16_t *output)
+{
+    if (!row_indices || !palette || !output || x1 > x2) return;
+    const uint8_t *index = row_indices + x1;
+    int16_t count = (int16_t)(x2 - x1 + 1);
+    // Unrolled by four: this loop replaces a Flash-to-RAM copy of the whole
+    // redrawn area, so it runs for every wallpaper pixel of every frame.
+    while (count >= 4) {
+        output[0] = palette[index[0]];
+        output[1] = palette[index[1]];
+        output[2] = palette[index[2]];
+        output[3] = palette[index[3]];
+        output += 4;
+        index += 4;
+        count -= 4;
+    }
+    while (count-- > 0) *output++ = palette[*index++];
+}
+
+uint16_t liquid_glass_rgb565_fill_mix(uint16_t foreground, uint16_t background,
+                                      uint8_t opa)
+{
+    if (opa <= LIQUID_GLASS_FILL_OPA_MIN) return background;
+    if (opa >= LIQUID_GLASS_FILL_OPA_MAX) return foreground;
+    if (foreground == background) return foreground;
+    // lv_color_16_16_mix(): 5-bit weight on the packed 0x07E0F81F layout.
+    uint32_t mix = ((uint32_t)opa + 4u) >> 3;
+    uint32_t bg = (uint32_t)(background | (uint32_t)background << 16) &
+                  0x7E0F81Fu;
+    uint32_t fg = (uint32_t)(foreground | (uint32_t)foreground << 16) &
+                  0x7E0F81Fu;
+    uint32_t result = ((((fg - bg) * mix) >> 5) + bg) & 0x7E0F81Fu;
+    return (uint16_t)((result >> 16) | result);
+}
+
+void liquid_glass_palette_tint(const uint16_t palette[LIQUID_GLASS_PALETTE_SIZE],
+                               uint16_t color, uint8_t opa,
+                               uint16_t out[LIQUID_GLASS_PALETTE_SIZE])
+{
+    if (!palette || !out) return;
+    for (size_t index = 0; index < LIQUID_GLASS_PALETTE_SIZE; ++index) {
+        out[index] = liquid_glass_rgb565_fill_mix(color, palette[index], opa);
+    }
+}
+
+void liquid_glass_fill_mix_span(uint16_t *pixels, int16_t count,
+                                uint16_t color, uint8_t opa)
+{
+    if (!pixels) return;
+    for (int16_t index = 0; index < count; ++index) {
+        pixels[index] = liquid_glass_rgb565_fill_mix(color, pixels[index], opa);
+    }
+}
+
 void liquid_glass_rgb565_lut_build(
     liquid_glass_rgb565_lut_t *lut,
     uint16_t tint,
@@ -245,6 +337,18 @@ void liquid_glass_composite_row(
     if (output != wallpaper_row + x1) {
         memcpy(output, wallpaper_row + x1, width * sizeof(uint16_t));
     }
+    liquid_glass_apply_coverage_row(lut, frames, y, x1, x2, output);
+}
+
+void liquid_glass_apply_coverage_row(
+    const liquid_glass_rgb565_lut_t *lut,
+    const liquid_glass_frame_t frames[LIQUID_GLASS_WINDOW_COUNT],
+    int16_t y,
+    int16_t x1,
+    int16_t x2,
+    uint16_t *output)
+{
+    if (!lut || !frames || !output || x1 > x2) return;
 
     liquid_glass_span_t spans[LIQUID_GLASS_MAX_ROW_SPANS];
     size_t count = liquid_glass_coverage_spans(frames, y, x1, x2, spans);

@@ -4,7 +4,8 @@
 
 # Liquid Glass UI on ESP32-C3
 
-An eight-scene interaction and motion showcase built for the AI Passport
+An app combining eight interaction scenes, two live usage dashboards, and Settings
+built for the AI Passport
 hardware: a 240×320 display, three physical buttons, 8 MB Flash, and no PSRAM.
 
 ![Liquid Glass UI on ESP32-C3](design/promo/liquid-glass-showcase-poster-v1-preview.jpg)
@@ -22,16 +23,36 @@ experiment and is not affiliated with Apple.
 | Devices | Activity | Moments | Appearance |
 | <img src="design/screenshots/05-devices.png" width="180" alt="Devices scene"> | <img src="design/screenshots/06-activity.png" width="180" alt="Activity scene"> | <img src="design/screenshots/07-moments.png" width="180" alt="Moments scene"> | <img src="design/screenshots/08-appearance.png" width="180" alt="Appearance scene"> |
 
-The unattended reel holds each page for seven seconds and advances its
-signature interaction once per second. The first physical input immediately
-hands control to the user.
+The images above show the original eight-scene release. The current app opens
+on Home, followed by the enabled pages in presentation order, then Settings.
+Home and Settings are always available; the other ten content pages can be
+hidden. Automatic page tours and scene demos are disabled.
 
-| Button | Action |
-| --- | --- |
-| UP | Next page |
-| DOWN | Move focus or selection |
-| OK | Run the focused action |
-| Long OK | Return to the hardware diagnostic menu |
+| Button | Browse mode | Scene controls |
+| --- | --- | --- |
+| UP / DOWN | Previous / next page | Move focus or change the current value |
+| OK | Run the page action | Activate selection; Controls selects the next row |
+| Long OK | Enter scene controls | Return to browsing |
+
+The footer briefly explains long OK when entering a page or switching modes.
+Home and Claude have no scene controls. Kaboo supports previous/next cards and pauses
+its eight-second rotation while scene controls are active. Its cards show token
+usage and cost; Claude shows used quota and reset time. Both expose sample age.
+Showcase actions and sample device states are labeled Demo; they do not share
+content, connect devices, or put the board to sleep. Controls adjusts real
+brightness and volume, and battery readings refresh once per minute. Home's
+hero uses a battery ring with the live percentage, current local time, and
+date/weekday. The clock accepts the computer timestamp from the BLE payload,
+also polls `ntp1.aliyun.com` when saved Wi-Fi credentials are available, and
+continues counting from the last saved value offline.
+
+Settings controls which content pages appear. Press OK or long OK to enter its
+controls, use UP/DOWN to select among ten checkboxes (four rows per view), and
+press OK to show or hide the selected page. Home is always on and Settings
+cannot be hidden. Long OK returns to browsing.
+Changes apply immediately; wait for "Saved on device" before powering off.
+Settings itself stays available even with all content pages hidden. Storage
+errors are shown as "Not saved (session only)" without discarding live changes.
 
 ## What it demonstrates
 

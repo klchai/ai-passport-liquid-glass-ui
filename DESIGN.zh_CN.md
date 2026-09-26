@@ -8,13 +8,13 @@
 
 本文定义硬件原生 Glass System 的长期视觉与交互边界。当前 Foundation 已实现
 Tokens、四种无障碍 Profile、确定性 Motion、三键 Focus、核心内容与控制组件、动态
-显示质量、八场景 Showcase，以及独立保留的旧 Motion Lab。组件真机成本在当前固件
+显示质量、八个展示场景与两个实时用量页面。组件真机成本在当前固件
 刷入并完成物理测量前保持待测状态。
 
 ## 方向契约
 
 - **核心命题：**一个具有光学活性的控制层悬浮在稳定内容之上。
-- **视觉世界：**深色摄影壁纸、通栏且安静的内容画布、克制的冷色光，以及只服务于
+- **视觉世界：**深石墨灰底上带冷色光的丝绸褶线、通栏且安静的内容画布，以及只服务于
   操作和焦点的玻璃。
 - **首屏：**内容层直接说明产品；底部常驻 Platter 表达输入和页码，但不遮挡内容。
 - **标志交互：**一个触发控件以轻微欠阻尼的 560 ms Morph 原位展开为 Menu，再回到
@@ -73,19 +73,21 @@ Material Engine 使用适合 RGB565 的预计算透明度、边缘、镜面高�
 | Focus | 320 ms | 单一 Focus Lens 的连续移动 |
 | Materialize | 520 ms | 材质和内容逐步可用 |
 | Morph | 560 ms | Trigger 原位成为 Menu、Popover 或 Sheet |
-| Page | 640 ms | 适配面板可见刷新节奏的整场景连续切换 |
+| Page | 400 ms | 适配面板可见刷新节奏的整场景连续切换 |
 
 `ui_glass_motion.*` 提供整数 Cubic Easing、只有一次克制 Overshoot 的确定性 Spring，
 以及通用 Morph Geometry。Reduced Motion 保留 80 ms Press，空间位移动效改为立即完成。
 
 ## 输入与焦点
 
-- 短按 UP 前进到下一张 Showcase 页面，双击 UP 返回上一页。
-- DOWN 执行当前场景的次操作，通常用于推进统一 Focus Model。
-- OK 激活当前 Focus 控件，或执行场景主操作。
-- 长按 OK 继续作为仓库统一的返回菜单操作。
-- 自动巡航从首个 Player 场景开始，展示每页的主要动效与状态反馈，并在第一次
-  实体输入后停止。
+- 浏览模式：UP/DOWN 切换上一页/下一页，OK 执行页面主操作。
+- 长按 OK 进入或退出页内操作，Home 与 Claude 保持只读。
+- 页内操作：UP/DOWN 移动焦点或调整值，OK 激活选项。Controls 使用 OK 切换下一行，
+  Kaboo 使用 UP/DOWN 前后翻卡。
+- 进入页面或切换模式时，底栏短暂说明长按 OK 的作用。页眉保留完整页名，
+  页内模式使用强调色标题。
+- 默认关闭自动翻页与场景演示。Kaboo 每八秒轮播一次，页内操作时暂停，
+  手动翻卡后延后恢复轮播。
 
 Focus 是沿连续轨迹移动的对象，不是每个 Row 各自凭空出现和消失的边框。关闭动画后，
 聚焦状态仍必须可见。
@@ -96,7 +98,7 @@ Focus 是沿连续轨迹移动的对象，不是每个 Row 各自凭空出现和
 状态。无障碍 Profile 是同一组件的 Variant，不是互不关联的复制品。
 
 首批可复用 C API 包含 Content Panel、Glass Platter、Focus Lens、Row、Toggle 和
-Slider。Morph Menu、Dock 和 Device Status 已在 Showcase 中验证，但在抽取公共 API
+Slider。Morph Menu 和 Device Status 已在 Showcase 中验证，但在抽取公共 API
 前不能宣称为可复用组件。完整且诚实的清单见
 `design/liquid-glass/components.json`。
 
@@ -105,11 +107,11 @@ Slider。Morph Menu、Dock 和 Device Status 已在 Showcase 中验证，但在�
 
 ## Patterns 与 Showcase
 
-真机 Showcase 是八场景交互与动效作品集。它保留原组件覆盖范围，但以可信的手机式
-场景承载，不再把实现分类直接展示给观众。页面顺序与稳定的内部组件标识刻意解耦：
+真机 Showcase 是八场景交互与动效作品集。它以可信的手机式场景承载组件，不再把
+实现分类直接展示给观众。页面顺序与稳定的内部组件标识刻意解耦：
 
 1. Player：通栏媒体内容、播放状态，以及从原控件展开的 Quick Actions Morph
-2. Home：带连续选区与内容运动的悬浮 Dock 导航
+2. Home：问候语卡片，以及带电量圆环和时间/日期的卡片
 3. Focus：分段模式、Toggle、选择项，以及唯一且连续移动的 Focus Lens
 4. Controls：带动画的玻璃 Slider Knob、Stepper 和可调 Progress
 5. Devices：列表遍历、持续焦点与 Row 激活反馈
@@ -118,14 +120,23 @@ Slider。Morph Menu、Dock 和 Device Status 已在 Showcase 中验证，但在�
 8. Appearance：可选择 Standard、High Contrast、Reduced Transparency 与 Reduced
    Motion 系统 Profile
 
-UP 是固定翻页键，DOWN 与 OK 始终留给当前场景，因此每页都能展示两种有意义的交互，
-又不需要反复学习页面导航。快速操作 Focus、Toggle、Slider 和 Segmented 时，从视觉
-对象当前采样位置重新定向，不启动互相竞争的动画。无人循环会覆盖 Player
-Menu 变形与选项移动、全部 Dock 目的地、Segmented/Toggle/Focus、三种调节器、
-多行 List、Activity 全部状态、Moments 全部操作，以及下一个 Appearance Profile 的应用。
+Kaboo 与 Claude 位于 Appearance 之后，分别为第九、第十页，Settings 为第十一页。
+Kaboo 标明 token 计数与模型，Claude 明确百分比是已用配额。两页均显示采样新鲜度并弱化旧值。
+示例内容与操作明确标记为演示。Controls 显示真实亮度与音量，以及音频不可用状态，
+电量采样每分钟更新一次。Home 的电量圆环与时间/日期卡片来自设备时钟；电脑 BLE
+payload 和 `ntp1.aliyun.com` 提供校时。
 
-旧三卡 Deck 保留为 Motion Lab，用于展示连续纵深交换和合成器优化，但不再作为默认
-产品 Pattern。
+快速操作 Focus、Toggle、Slider 和 Segmented 时，从视觉对象当前采样位置重新
+定向，不启动互相竞争的动画。High Contrast 与 Reduced Transparency 除了应用于
+共享控件，也覆盖内容画布、Player、Home 与实时数据页面。
+
+
+Home 是固定默认首页并始终显示。Settings 是第十一页，也始终保留。它按展示顺序
+列出十个内容页，每屏四个复选框。
+页内 UP/DOWN 移动选项，OK 切换可见性。启动、翻页和底栏邻居页名均遵守可见集合，
+隐藏可选页面后仍可访问 Home 与 Settings，Home 不能切换关闭。设置以稳定页面 ID 的位掩码保存到应用 NVS 的 `dashboard`
+命名空间、`pages_v1` 键，读写不涉及身份区或 Recovery。UI 只发布原子快照，应用
+任务每秒合并保存一次；只有保存成功才显示已保存，失败保留会话设置并提示。
 
 ## Runtime 与性能
 
@@ -133,13 +144,19 @@ Runtime 管理壁纸合成器、语义 Mode、刷新 Timer，以及带迟滞的�
 
 | Quality | 刷新周期 | 动态玻璃上限 | Glint |
 | --- | ---: | ---: | --- |
-| Full | 10 ms | 6 | 开启 |
-| Balanced | 16 ms | 3 | 开启 |
+| Full | 16 ms | 6 | 开启 |
+| Balanced | 25 ms | 3 | 开启 |
 | Economy | 33 ms | 1 | 关闭 |
 
-连续三次慢采样才允许降级，连续六次快采样才恢复，因此一次全屏过渡不会永久降低质量。
-BSP 每秒提供 Update Rate、CPU Render、DMA Wait、SPI Wire-Time Floor、更新像素、
-Invalidation 请求和 DMA Heap 快照。
+刷新周期同时决定 LVGL 动画 Timer 的周期，因此就是实际的动效节奏：约每秒 60、40、30 帧。
+页面转场期间锁定为 Economy。Dashboard 把 BSP 每秒一次的采样（平均 Submit 时间与每次
+更新像素数）送入质量控制器。连续三次慢采样才允许降级，连续六次快采样才恢复，因此一次
+全屏过渡不会永久降低质量。BSP 每秒提供 Update Rate、CPU Render、DMA Wait、
+SPI Wire-Time Floor、更新像素、Invalidation 请求和 DMA Heap 快照。
+
+合成器把索引色（LGP8）壁纸逐行解码、直接写入 LVGL 绘制缓冲区，每像素一次调色板查表。
+全屏内容画布在同一遍中绘制：用预先着色的调色板副本解码，压暗后的壁纸不再需要逐像素
+混合；画布对象本身保持透明，只提供几何范围。
 
 ## 禁止作为默认方案
 

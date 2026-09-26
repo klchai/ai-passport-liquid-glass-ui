@@ -6,6 +6,198 @@
 
 ## Unreleased
 
+- Removed features that repeated other pages. Home drops its Play and Link
+  tabs and the dock that switched between them: Play showed the same demo
+  track as Player, and Link claimed "Passport Linked" whatever the real
+  connection, which the header dot already shows on every page. Home is now
+  one card with the greeting, battery ring, time, and date, so it has no scene
+  controls and OK does nothing there; its footer rim now matches the other
+  pages. Player's status line no longer repeats "Demo | Passport linked"; it
+  stays empty until a Quick Action reports its demo result.
+
+- Cut the dashboard's drawing work without changing what it shows. Pages no
+  longer redraw when nothing changed: the shell stopped moving its header to
+  the front on every refresh, which repainted the whole screen on every mode
+  toggle, hint expiry, and Settings edit, and the BLE link dot stopped
+  refreshing the display five times a second on idle pages. Kaboo and Claude
+  skip labels and bars whose data did not change. Animations repaint less: a
+  Home dock change, a Player Quick Actions open, and a Settings group change
+  redraw 411k, 580k, and 25k pixels instead of 630k, 1.46M, and 77k. An OK
+  press on Moments and Devices now visibly compresses the control or the focus
+  lens; before, it redrew the row without changing a pixel. The wallpaper is
+  stored as a lossless 137-color indexed image (77,324 bytes instead of
+  153,600), which halves the Flash reads of every redraw, and the compositor
+  draws each page's quieting canvas in the same pass instead of LVGL blending
+  it pixel by pixel. Animations run at the quality tier's cadence, about 60,
+  40, or 30 frames per second instead of 30 in every tier, and the adaptive
+  quality controller now receives the display samples that drive it. LVGL's
+  style cache and 32-line draw bands trim the remaining per-frame overhead. In
+  a host simulation of this firmware every rest-state capture is
+  pixel-identical, and a scripted tour of all eleven pages takes 32% fewer CPU
+  instructions even though animations now render up to twice as many frames.
+  The 32-line draw buffers still need a board check of free heap and I2S
+  start-up before release.
+
+- Replaced the photographic blue wallpaper with an original graphite one.
+  Satin folds of cool light rise from the lower left, so the Home dock and
+  the footer glass have light behind them to transmit, while the title area
+  stays dark. tools/build_liquid_glass_wallpaper.py generates the scene and
+  ordered-dithers it so the dark gradients do not band in RGB565. The table
+  the glass rims use to borrow background color now matches the asset it
+  samples -- the old table did not match the baked wallpaper -- and
+  validate.sh fails if the two drift apart.
+
+- Fixed three liquid-glass rendering issues. Circular and capsule glass --
+  Player's Quick Actions trigger, the Focus toggle knob, the Controls slider
+  thumb, Activity's status chips, and Kaboo's model chip -- now draws its
+  optical rim. The "Refined page glass hierarchy" entry below promised chips
+  restrained edges, but the rim code capped the corner radius by width
+  alone, found no straight edge on any circle or LV_RADIUS_CIRCLE capsule,
+  and returned before drawing a single ring. The radius now follows LVGL's
+  clamp to half the short side; circles draw their rings but no straight
+  specular segments or glint.
+  The Controls slider thumb renders as a full 14x14 glass thumb instead of a
+  6 px dash: LVGL 9.5's overflow-visible flag widens a parent's clip only by
+  the parent's own extra draw size, which is zero for the plain track, so
+  the thumb, a child of the six-pixel track, was cut to the track's height.
+  It is now the track's sibling. The Moments art card keeps all four rounded
+  corners: LVGL clips children to the card's rectangle rather than its
+  rounded outline, so the decorative circle and band squared off the
+  top-right and bottom-left corners. Both shapes now sit inside the outline.
+
+- Fixed Claude quota bars washing out to near-white when their source went
+  stale. A window at 100% is the page's loudest warning, but a stale reading
+  forced the bar to muted text color -- rendering a maxed-out red bar as a
+  faint bar that was hard to tell from an empty or no-data one. Stale windows
+  now keep their semantic color (accent/warning/danger by usage) and signal
+  age through half opacity instead, alongside the source-age note that already
+  says the data may be stale.
+
+- Refined page glass hierarchy: Home's hero, Activity feedback surfaces, and
+  Kaboo/Claude data cards and Kaboo's model chip now use restrained optical
+  edges. Passive chips and nested controls no longer read as flat fills or
+  competing focus outlines. Accessibility opacity is preserved for the new
+  surfaces.
+
+- Fixed three more liquid-glass contract issues. The Controls merged panel,
+  Home dock, and Player morph face now build from the active control material,
+  so High Contrast and Reduce Transparency get the CONTRAST ring/specular
+  archive (rings 60/20/6) instead of staying regular glass; the depth-based rim
+  strength still applies on top. The Focus toggle knob and the Controls slider
+  thumb now share one material-aware edge recipe (8/9 of the focus rim:
+  112/131/120/112 across the four modes), so the same role no longer carries
+  two hard-coded rim strengths and both honor the CONTRAST archive. Thumb glint
+  sweeps now obey the Economy quality tier's glint contract: the thumb still
+  slides, but the specular sweep is suppressed.
+
+- Fixed four liquid-glass layering and accessibility issues. The Controls
+  focus lens now sits four pixels inside the merged panel on every side, so its
+  three optical rings no longer coincide pixel-for-pixel with the panel's rim
+  and read as a double border. Focus's segmented selection and Home's dock
+  selection now follow the control material, fill opacity, and edge strength of
+  the active theme, staying opaque and high-contrast in High Contrast and
+  Reduce Transparency modes instead of remaining 70%-transparent regular glass.
+  Claude's two read-only quota cards are plain content surfaces (like Player's
+  cards) instead of interactive glass platters, removing the focus-strength rim
+  and the opposing strong edges between them; only the global footer keeps
+  glass on that page.
+
+- Fixed a clock sync that could never recover. A device whose clock was more
+  than a day behind rejected the very payload carrying the correct time, and
+  kept rejecting every one after it, freezing the dashboard with a wrong clock
+  and stale Kaboo/Claude figures. Firmware built a week before it is flashed hit
+  this on first connection, as did any device powered off across a weekend. The
+  receiver clock now counts as a trust anchor only after this boot has really
+  synchronized, so the first payload always lands.
+
+- Home's greeting follows the clock instead of always reading "Good evening",
+  and turns over on the hour. Before the first synchronization it reads "Hello"
+  rather than asserting a time of day the device does not know.
+
+- Hardened BLE time updates by bounding generated timestamps against the
+  receiver clock, separating one-day sample skew from the seven-day quota-reset
+  horizon, and making connection status fields atomic. Wi-Fi now retries after
+  station disconnects so SNTP can recover without a reboot.
+
+- Home's hero now uses a battery ring with a live percentage, current local
+  time, and date/weekday. Computer payloads synchronize the clock immediately;
+  SNTP polls `ntp1.aliyun.com` when a network interface is available, persists
+  the last good timestamp, and keeps the clock advancing while offline. The
+  footer shortens Appearance to `Appear.` when its neighbour slot is too narrow.
+
+- Home is now the fixed default landing page and cannot be hidden. Settings is
+  also unhideable, so restoring optional pages always remains possible. Older
+  saved masks are normalized to keep Home visible before navigation starts.
+
+- Added Settings after Claude to choose which of the ten content pages appear
+  in navigation. Four rows at a time retain the glass focus and checkbox style;
+  UP/DOWN select and OK toggles in scene mode. Changes apply immediately and
+  save in the background, surviving restart. Settings is always reachable,
+  including when every content page is hidden. Startup and navigation use only
+  enabled pages, and bounded footer labels accommodate new neighbour pairs.
+  Storage failure is shown explicitly while changes remain usable in memory.
+- Polished all ten dashboard pages without replacing the glass layout. Mode
+  entry/exit hints explain long OK without crowding long page titles. Controls
+  show brightness percentages and audio availability; Activity uses consistent
+  demo states. Player, Home, Devices, and Moments identify sample content and
+  keep action feedback separate from connection state. Focus dims its backdrop
+  and uses a checkbox for Auto resume. Accessibility opacity now covers Player,
+  Home, and the data pages. Kaboo labels token units, truncates long model names,
+  supports previous/next cards, and pauses rotation during scene control.
+  Claude labels used quota, and both data pages expose sample age and mute old
+  values. Battery readings refresh in the application task once per minute.
+
+- Fixed three showcase layout defects seen on hardware. Player's title and
+  album cards now share the 212 px content width; the Quick Actions trigger
+  sits 8 px inside the title card instead of 6 px past its edge; the expanded
+  menu keeps the trigger's right edge so it still morphs from its own origin;
+  its shadow stays inside the semi-transparent surface instead of dropping
+  below it as a second outline; and the speaker status lines clear the
+  persistent nav bar. Home's dock selection is a control-radius rounded
+  rectangle inset 8 px vertically inside the floating-radius dock (22 − 8 =
+  14), so the corner arcs run concentric instead of the old pill curving more
+  tightly than the dock around it; the 10 px side margins centre the three
+  tabs. Focus's segmented indicator is a Regular-material glass surface at accent
+  tint, inset by the optic ring count so its edge rings never land on the
+  platter's, carrying the control radius and a glint sweep on selection.
+- Gave each Claude quota window its own wire flag so a payload carrying only
+  one of them is no longer rejected outright. Claude Code emits a window only
+  while it is active, and the previous single flag made the missing window's
+  zero reset epoch fail validation, discarding the valid Kaboo data in the same
+  packet. A window with no data now reads "not active" instead of a fabricated
+  0%. The Mac bridge flags a window only when it has both a percentage and a
+  usable reset time, matches devices on the service UUID alone (never the
+  advertised name, which is not an identity), accepts `--device <address>` to
+  pin one board, and survives a dropped connection or an unreadable snapshot
+  instead of exiting. A failed advertising restart now retries on a timer;
+  previously it only logged, leaving the device permanently undiscoverable
+  while the link state machine believed it was advertising.
+- Unified showcase rounded rectangles on the Glass System's control, panel,
+  and floating radius tokens while retaining explicit circles, capsules, and
+  square canvas layers. Repository checks now reject new literal radius values
+  in showcase solid and reference-glass objects.
+- Merged the eight-scene showcase and the live-data dashboard into one
+  ten-page carousel: Player, Home, Focus, Controls, Devices, Activity,
+  Moments, Appearance, then Kaboo token usage and Claude quota. The two data
+  pages are fed over BLE from a companion Mac (`tools/usage_bridge.py`) through
+  an always-on NimBLE GATT server that the app owns exactly once. All ten
+  pages share one runtime, one screen, one
+  header/footer, and one 200 ms master timer that now drives the 7 s tour, the
+  1 s scene-step demos, Kaboo's 8 s card rotation, and BLE refresh together.
+  The footer is visible on every page and names the left and right neighbour
+  pages. Keys are modal: in browse mode UP and DOWN turn pages and OK runs the
+  page's primary action (Kaboo's card advance, Player's Quick Actions); a long
+  press on OK enters scene mode on pages with in-page interaction, where
+  UP/DOWN move focus and OK acts, and another long press leaves it.
+  The unattended tour skips the data pages and no longer applies an
+  accessibility mode when it passes Appearance, so the theme no longer drifts
+  each cycle; a manual OK on Appearance still applies one. The header keeps
+  the battery percentage and adds a BLE link dot that refreshes every tick;
+  the page counter was dropped from the title so the two fit. Home's dock and
+  Player's status lines moved up to clear the persistent footer. Data-page
+  labels are redrawn only when a new BLE packet, a card change, or a minute
+  boundary makes their text differ, instead of on every tick. A digit-subset
+  44 px face renders Kaboo's headline number.
 - Added the first reusable AI Passport Glass System foundation: portable design
   tokens, four accessibility profiles, deterministic non-linear motion, one
   continuous three-button focus model, full-bleed content canvases, semantic

@@ -1,0 +1,3028 @@
+// main/showcase_scenes.c —— 八个展示场景 + Kaboo + Claude + Settings。
+//
+// 这是应用的全部 UI。Settings 管理可见页面；Kaboo / Claude 两页显示由
+// Mac 经 BLE 推来的实时数据（见 usage_link.c）。十一个页面共用一个 runtime、
+// 一块屏幕、一套 header/footer chrome、一个 200ms
+// 主定时器和同一个焦点/转场系统。
+//
+// 按键约定（十一个页面统一，模态；实现见 dashboard_key）：
+//   浏览模式  UP 上一页 / DOWN 下一页；OK 执行本页主操作
+//            （Kaboo 翻卡、Player 开关 Quick Actions、其余展示页执行焦点动作）
+//   长按 OK   在有页内交互的页面进入 / 退出页内模式（header 显示 ✎）
+//   页内模式  UP / DOWN 移动焦点、调值或切换页内状态；OK 执行焦点动作
+//              （Controls 页 OK 切换控件，UP / DOWN 增减当前值）
+#include "bsp_audio.h"
+#include "bsp_display.h"
+#include "dashboard.h"
+
+#include "ui_glass.h"
+#include "ui_glass_focus.h"
+#include "ui_glass_motion.h"
+#include "ui_glass_runtime.h"
+#include "ui_glass_widgets.h"
+#include "usage_link.h"
+#include "ui_dashboard_cards.h"
+#include "ui_dashboard_pages.h"
+#include "dashboard_preferences.h"
+#include "time_sync.h"
+
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "lvgl.h"
+
+#include <inttypes.h>
+#include <stdarg.h>
+#include <stdatomic.h>
+#include <stdio.h>
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+
+// 无人巡航与页内自动演示：默认关闭。看板长期摆在桌上，页面自己翻走或控件
+// 自己动会干扰阅读，也让截图评审无法定格。把这两个常量改回 true 即恢复。
+#define SHOWCASE_TOUR_ENABLED  false
+#define SHOWCASE_STEPS_ENABLED false
+
+#define SHOWCASE_SCENE_Y         44
+#define SHOWCASE_SCENE_HEIGHT   276
+// One master tick drives everything. 200ms is the GCD of every period below,
+// so independent counters never drift against each other.
+#define SHOWCASE_TICK_MS         200
+// The unattended reel is meant to be watched, not benchmarked. Seven seconds
+// leaves time to read the scene after its signature interactions have played.
+#define SHOWCASE_TOUR_PERIOD_MS 7000
+#define SHOWCASE_SCENE_STEP_MS  1000
+#define SHOWCASE_MAX_FOCUS        6
+
+#define SHOWCASE_DEPTH_MIN         0
+#define SHOWCASE_DEPTH_MAX         4
+#define SHOWCASE_DEPTH_STEP        1
+#define SHOWCASE_VOLUME_MIN        0
+#define SHOWCASE_VOLUME_MAX      100
+#define SHOWCASE_VOLUME_STEP      10
+
+// The compact checkbox glyph predates the three surface-radius tokens. Using
+// CONTROL=14 on 22/12 px squares would make LVGL clamp both into circles, so
+// preserve this local geometry until the design system explicitly approves a
+// compact radius token.
+#define SHOWCASE_RADIUS_CHECKBOX_OUTER 6
+#define SHOWCASE_RADIUS_CHECKBOX_INNER 3
+
+// Resting opacity of Player's full-screen dimmer while Quick Actions is open.
+#define PLAYER_DIMMER_OPA 36
+
+// Kaboo 卡片轮换：8 秒够读完一个大数字连同费用（4 秒在真机上被反馈为翻太快）。
+// 用户手动翻卡后暂停自动轮换一段时间，避免刚看清就被翻走。
+#define KABOO_CARD_COUNT          3
+#define CARD_ROTATE_MS         8000
+#define CARD_MANUAL_HOLD_MS   10000
+// 数据源 TTL：超过这个时长就不再声称数字是"当前"值。
+#define SOURCE_TTL_SECONDS      900
+
+LV_FONT_DECLARE(font_digits_44);
+
+static bool is_data_page(showcase_page_t page)
+{
+    return page == PAGE_KABOO || page == PAGE_CLAUDE;
+}
+
+// 该页是否有值得进入页内模式的交互。Home 只有一张状态卡，Claude 两卡同屏，
+// 都没有可操作元素，长按 OK 在它们上面无效。
+static bool page_has_scene_interaction(showcase_page_t page)
+{
+    return page != SHOWCASE_NAVIGATION && page != PAGE_CLAUDE;
+}
+
+typedef struct {
+    lv_obj_t *outgoing;
+    lv_obj_t *incoming;
+    int8_t direction;
+} page_transition_t;
+
+typedef struct {
+    lv_obj_t *lens;
+    int16_t start_y;
+    int16_t target_y;
+    int16_t start_height;
+    int16_t target_height;
+} focus_motion_t;
+
+typedef struct {
+    lv_obj_t *surface;
+    lv_obj_t *shadow;
+    lv_obj_t *context;
+    lv_obj_t *button_label;
+    lv_obj_t *dimmer;
+    lv_obj_t *menu;
+    lv_obj_t *highlight;
+    lv_obj_t *menu_rows[3];
+    ui_glass_morph_frame_t from;
+    ui_glass_morph_frame_t to;
+    uint32_t base_tint;
+    bool target_open;
+    bool open;
+    bool animating;
+    uint8_t item;
+    uint8_t visual_depth;
+    uint8_t last_depth;
+} morph_view_t;
+
+typedef struct {
+    lv_obj_t *title;
+    lv_obj_t *subtitle;
+    lv_obj_t *hero;
+    lv_obj_t *battery_ring;
+    lv_obj_t *battery_percent;
+    lv_obj_t *state_label;
+    lv_obj_t *value_label;
+} navigation_view_t;
+
+typedef struct {
+    lv_obj_t *indicator;
+    int16_t start_x;
+    int16_t target_x;
+} segment_motion_t;
+
+typedef struct {
+    lv_obj_t *status_chip;
+    lv_obj_t *status_label;
+    lv_obj_t *alert;
+    lv_obj_t *alert_title;
+    lv_obj_t *alert_detail;
+    ui_glass_component_t progress;
+    lv_obj_t *toast_label;
+} feedback_view_t;
+
+static const char *const PAGE_TITLES[SHOWCASE_PAGE_COUNT] = {
+    "Moments",
+    "Focus",
+    "Controls",
+    "Devices",
+    "Player",
+    "Home",
+    "Activity",
+    "Appearance",
+    "Kaboo",
+    "Claude",
+    "Settings",
+};
+
+static const uint8_t SHOWCASE_BRIGHTNESS_LEVELS[] = {
+    10, 40, 70, 100,
+};
+
+static ui_glass_runtime_t s_runtime;
+// Every page scene is created inside this transparent host, which sits below
+// the header and footer in the screen's child order. Reordering children with
+// lv_obj_move_foreground() invalidates the whole parent, so keeping the scenes
+// under a fixed host means the chrome never has to be moved above a new scene.
+static lv_obj_t *s_scene_host;
+static lv_obj_t *s_scene;
+static lv_obj_t *s_header_chrome;
+static lv_obj_t *s_header_title;
+static lv_obj_t *s_link_dot;        // BLE 链路指示：绿=已连接，灰=断开
+static lv_obj_t *s_battery_label;   // 右上角电量，规范默认要求显示
+static atomic_int s_battery_soc = -1; // Worker publishes; LVGL timer renders.
+static int s_battery_drawn = -2;
+static uint32_t s_mode_hint_ms;
+static lv_obj_t *s_footer;
+static lv_obj_t *s_footer_label;
+static lv_obj_t *s_footer_left;
+static lv_obj_t *s_footer_right;
+// 按键模型分两个模式，避免同一个键在不同页面语义不同：
+//
+//   浏览模式（默认）  UP/DOWN = 上/下一页；OK = 执行当前页主操作；
+//                     长按 OK = 进入页内模式（仅当该页有页内交互）
+//   页内模式          UP/DOWN = 移焦点 / 切换页内状态；OK = 执行焦点动作；
+//                     长按 OK = 退回浏览模式
+//
+// 之前 DOWN 固定做页内操作，翻页只能靠 UP 单向 + 双击/长按回退，与"上下键
+// 翻页"的直觉冲突。现在 UP/DOWN 在浏览模式下始终是翻页。
+static bool s_scene_mode;           // true = 页内模式
+// 单一主定时器。原本的巡航 timer 与场景步进 timer 都并入它的计数器，
+// 消除了翻页时创建/销毁 timer 的竞争窗口。
+static lv_timer_t *s_tick_timer;
+static uint32_t s_tour_elapsed_ms;
+static uint32_t s_step_elapsed_ms;
+static bool s_tour_killed;          // 任何按键永久停止无人巡航
+static bool s_scene_done;           // 当前场景的步进演示已跑完
+static page_transition_t s_page_motion;
+// The last one-second display sample fed to the adaptive quality controller.
+static uint32_t s_perf_sequence;
+
+// ---- 实时数据页（Kaboo / Claude）状态 ----
+
+static struct {
+    lv_obj_t *label;      // 窗口名（TODAY / 7 DAYS / 30 DAYS）
+    lv_obj_t *value;      // 大字 token 数
+    lv_obj_t *cost;
+    lv_obj_t *model;      // 模型 chip 文字
+    lv_obj_t *dots[KABOO_CARD_COUNT];
+    lv_obj_t *note;
+} s_kaboo_view;
+
+static struct {
+    lv_obj_t *five_value;
+    lv_obj_t *five_bar;
+    lv_obj_t *five_reset;
+    lv_obj_t *seven_value;
+    lv_obj_t *seven_bar;
+    lv_obj_t *seven_reset;
+    lv_obj_t *note;
+} s_claude_view;
+
+static uint8_t  s_kaboo_card;
+static uint32_t s_card_elapsed_ms;
+static uint32_t s_card_hold_ms;
+static focus_motion_t s_focus_motion;
+static morph_view_t s_morph;
+static showcase_page_t s_page;
+static bool s_transitioning;
+static ui_glass_quality_t s_saved_quality = UI_GLASS_QUALITY_FULL;
+static uint8_t s_scene_step;
+static segment_motion_t s_segment_motion;
+static lv_obj_t *s_player_state_label;
+static bool s_player_playing = true;
+static lv_obj_t *s_player_demo_label;
+static lv_obj_t *s_moments_result_label;
+static lv_obj_t *s_devices_result_label;
+static lv_obj_t *s_selection_canvas;
+static feedback_view_t s_feedback;
+
+static ui_glass_focus_model_t s_focus;
+static lv_obj_t *s_focus_lens;
+static ui_glass_component_t s_focus_components[SHOWCASE_MAX_FOCUS];
+static int16_t s_focus_y[SHOWCASE_MAX_FOCUS];
+static int16_t s_focus_h[SHOWCASE_MAX_FOCUS];
+static uint8_t s_focus_count;
+
+// 页内焦点钩子：focus_refresh_states() 全页共用、不感知按钮样式，个别页面
+// （Moments）需要在焦点行变化时联动页内专属的光学处理。
+typedef void (*focus_page_hook_t)(uint8_t index);
+static focus_page_hook_t s_focus_page_hook;
+// Moments 的 Share 玻璃钮建面时的原始光学边强度：获焦临时置 0、离焦按值恢复，
+// 不能写常量（REGULAR 为 86，HC/RT 的 CONTRAST 为 76）。
+static uint8_t s_moments_share_edge;
+
+static uint8_t s_segment_index;
+static bool s_control_toggle = true;
+static bool s_selection_check = true;
+static bool s_selection_radio = true;
+static uint8_t s_control_slider = 100;
+static uint8_t s_stepper_value = 3;
+static uint8_t s_settings_selection;
+static lv_obj_t *s_settings_note;
+// Settings shows four page rows at a time. Moving to another group rewrites
+// these rows in place instead of rebuilding (and fully repainting) the page.
+static lv_obj_t *s_settings_range;
+static lv_obj_t *s_settings_dividers[UI_DASHBOARD_SETTINGS_ROWS - 1];
+static uint8_t s_device_volume = 70;
+static uint8_t s_feedback_state;
+static navigation_view_t s_navigation;
+static lv_obj_t *s_adjustment_surfaces[1];
+static uint32_t s_adjustment_tints[1];
+static uint8_t s_adjustment_opacities[1];
+static QueueHandle_t s_audio_volume_queue;
+typedef enum { AUDIO_STARTING, AUDIO_READY, AUDIO_UNAVAILABLE } audio_status_t;
+static atomic_int s_audio_status = AUDIO_STARTING;
+
+static void segment_motion_set(void *value, int32_t progress);
+static void press_set(void *object, int32_t inset);
+static void focused_action(void);
+static void link_dot_refresh(void);
+static void navigation_clock_refresh(void);
+static void navigation_battery_refresh(void);
+
+static lv_obj_t *plain_object(lv_obj_t *parent, int x, int y,
+                              int width, int height)
+{
+    lv_obj_t *object = lv_obj_create(parent);
+    lv_obj_remove_flag(object, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(object, x, y);
+    lv_obj_set_size(object, width, height);
+    lv_obj_set_style_pad_all(object, 0, 0);
+    lv_obj_set_style_border_width(object, 0, 0);
+    lv_obj_set_style_bg_opa(object, LV_OPA_TRANSP, 0);
+    return object;
+}
+
+static lv_obj_t *solid_object(lv_obj_t *parent, int x, int y,
+                              int width, int height, int radius,
+                              uint32_t color, lv_opa_t opacity)
+{
+    lv_obj_t *object = plain_object(parent, x, y, width, height);
+    lv_obj_set_style_radius(object, radius, 0);
+    lv_obj_set_style_bg_color(object, lv_color_hex(color), 0);
+    lv_obj_set_style_bg_opa(object, opacity, 0);
+    return object;
+}
+
+static lv_obj_t *text_at(lv_obj_t *parent, const char *text,
+                         int x, int y, const lv_font_t *font,
+                         uint32_t color)
+{
+    lv_obj_t *label = ui_glass_label(parent, text, font, color);
+    lv_obj_set_pos(label, x, y);
+    return label;
+}
+
+static const ui_glass_theme_t *theme(void)
+{
+    return ui_glass_runtime_theme(&s_runtime);
+}
+
+// Label colors are re-applied by shared refresh paths (shell, tabs, menus,
+// data pages); an unchanged color must not redraw the label.
+static void set_label_color(lv_obj_t *label, uint32_t color)
+{
+    ui_glass_set_text_color_if_changed(label, color);
+}
+
+static void set_label_text(lv_obj_t *label, const char *text)
+{
+    ui_glass_set_label_text_if_changed(label, text);
+}
+
+static void set_label_text_fmt(lv_obj_t *label, const char *format, ...)
+    __attribute__((format(printf, 2, 3)));
+static void set_label_text_fmt(lv_obj_t *label, const char *format, ...)
+{
+    char text[48];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(text, sizeof(text), format, args);
+    va_end(args);
+    ui_glass_set_label_text_if_changed(label, text);
+}
+
+static uint8_t opacity_clamp(int value)
+{
+    if (value < 0) return 0;
+    if (value > 255) return 255;
+    return (uint8_t)value;
+}
+
+static lv_obj_t *content_layer_create(lv_obj_t *parent, int x, int y,
+                                      int width, int height,
+                                      const ui_glass_theme_t *t)
+{
+    (void)t;
+    // Content stays on the wallpaper plane. Only controls and transient
+    // presentation surfaces receive glass material.
+    return plain_object(parent, x, y, width, height);
+}
+
+// A content canvas quiets the wallpaper under a page. The compositor draws
+// it in the wallpaper pass (one palette lookup per pixel instead of a copy
+// plus an LVGL blend), so the object stays transparent. Only if the
+// compositor has no free slot does LVGL fill the object itself.
+static void quiet_canvas_set(lv_obj_t *canvas, uint32_t color, lv_opa_t opa)
+{
+    if (ui_glass_compositor_set_canvas(s_runtime.backdrop, canvas, color,
+                                       opa)) {
+        ui_glass_set_bg_opa_if_changed(canvas, LV_OPA_TRANSP);
+        return;
+    }
+    ui_glass_set_bg_color_if_changed(canvas, color);
+    ui_glass_set_bg_opa_if_changed(canvas, opa);
+}
+
+static lv_obj_t *quiet_canvas_create(lv_obj_t *parent, int x, int y,
+                                     int width, int height,
+                                     uint32_t color, lv_opa_t opa)
+{
+    lv_obj_t *canvas = plain_object(parent, x, y, width, height);
+    lv_obj_set_style_radius(canvas, 0, 0);
+    quiet_canvas_set(canvas, color, opa);
+    return canvas;
+}
+
+static lv_opa_t content_canvas_opacity(void)
+{
+    switch (s_runtime.mode) {
+    case UI_GLASS_MODE_HIGH_CONTRAST:
+        return 224;
+    case UI_GLASS_MODE_REDUCED_TRANSPARENCY:
+        return LV_OPA_COVER;
+    case UI_GLASS_MODE_STANDARD:
+    case UI_GLASS_MODE_REDUCED_MOTION:
+    default:
+        return 96;
+    }
+}
+
+static lv_opa_t content_group_opacity(void)
+{
+    return s_runtime.mode == UI_GLASS_MODE_STANDARD ||
+                   s_runtime.mode == UI_GLASS_MODE_REDUCED_MOTION
+               ? 190
+               : LV_OPA_COVER;
+}
+
+static lv_obj_t *showcase_content_stage_create(
+    lv_obj_t *root, const ui_glass_theme_t *t)
+{
+    // Quiet the photographic wallpaper edge-to-edge instead of placing every
+    // scene in the same rounded card. The footer remains above the undimmed
+    // wallpaper so its own glass transmission stays visible.
+    quiet_canvas_create(root, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH, 228,
+                        t->content_surface, content_canvas_opacity());
+    return content_layer_create(root, 16, 4, 208, 204, t);
+}
+
+static lv_obj_t *content_divider_create(lv_obj_t *parent, int y,
+                                        const ui_glass_theme_t *t)
+{
+    return solid_object(parent, 20, y, 168, 1, 0,
+                        t->text_muted, LV_OPA_20);
+}
+
+// Preserve the standard material while making accessibility modes opaque.
+static lv_opa_t accessible_opacity(lv_opa_t opacity)
+{
+    if (s_runtime.mode == UI_GLASS_MODE_REDUCED_TRANSPARENCY) {
+        return LV_OPA_COVER;
+    }
+    if (s_runtime.mode == UI_GLASS_MODE_HIGH_CONTRAST && opacity < 224) {
+        return 224;
+    }
+    return opacity;
+}
+
+static void reference_glass_apply(lv_obj_t *surface, uint32_t base_tint,
+                                  uint8_t opacity, uint8_t depth)
+{
+    if (!surface) return;
+    if (depth > 4) depth = 4;
+    uint32_t top = ui_glass_mix_rgb(base_tint, 0xE9F8FF,
+                                    (uint8_t)(28 + depth * 5));
+    uint32_t bottom = ui_glass_mix_rgb(base_tint, 0x03101C,
+                                       (uint8_t)(34 + depth * 4));
+    uint32_t fill = ui_glass_mix_rgb(top, bottom, 116);
+    ui_glass_surface_set_tint(surface, fill,
+                              accessible_opacity(opacity_clamp(opacity + depth * 2)));
+    // LVGL's software blur shadow starves the idle task on this no-PSRAM C3.
+    // Depth is represented by cheap offset silhouettes owned by the scene.
+    lv_obj_set_style_shadow_width(surface, 0, 0);
+    // Low fill opacity needs a stronger optical rim to read as a material
+    // boundary instead of a washed-out rectangle. The optics profile keeps
+    // the highlight local, so this does not restore the old double white rule.
+    // T5 已定案（候选①，保留）：78 + depth*8 的顶端（depth=4）= 110，高于材质
+    // 档案最高种子 CLEAR 102，但档案 edge_strength 只是建面种子、不是天花板。
+    // 本机无模糊核，景深的主要可感知通道就是这条边：110 时 REGULAR 外环不透明
+    // 度 92、顶高光 97；钳到 102 则降到 85/90，且与 depth=3 完全同值，最高一档
+    // 景深（Player 整块展开玻璃、Controls 景深步进器拨满）在边上直接丢级。
+    // 110 也并未出族：出货 UI 里 toggle/slider 拇指 = focus*8/9 = 112（外环 94）、
+    // focus 透镜 126/148/136（外环 105 起），110 恰好夹在 CLEAR 种子 102 与拇指
+    // 112 之间。另一个调用点不受影响：Controls 合并底板跟随步进器 0..4，
+    // 本就需要完整五档。
+    ui_glass_surface_set_edge_strength(surface, 78 + depth * 8);
+}
+
+static lv_obj_t *reference_glass_create(lv_obj_t *parent,
+                                        int x, int y, int width, int height,
+                                        int radius, uint8_t opacity,
+                                        uint8_t depth,
+                                        const ui_glass_theme_t *t,
+                                        uint32_t *base_tint)
+{
+    uint32_t borrowed = ui_glass_background_at_y(
+        (int16_t)(SHOWCASE_SCENE_Y + y + height / 2));
+    uint32_t tint = ui_glass_mix_rgb(borrowed, t->control_tint, 164);
+    lv_obj_t *surface = ui_glass_surface_create(
+        parent, x, y, width, height, radius, tint, opacity,
+        UI_GLASS_MATERIAL_REGULAR);
+    reference_glass_apply(surface, tint, opacity, depth);
+    // Both callers (Controls merged panel, Player morph face) live on the
+    // control plane, so High Contrast / Reduce Transparency must swap in the
+    // CONTRAST archive (rings 60/20/6, specular 64, narrower glint) instead
+    // of staying REGULAR. The depth rim written above still owns
+    // edge_strength; this only selects the ring/specular profile.
+    ui_glass_surface_set_material(surface, t->control_material);
+    if (base_tint) *base_tint = tint;
+    return surface;
+}
+
+// 两个"停止"现在只是翻标志：真正的 timer 是常驻的主定时器，不再随页创建销毁。
+static void stop_tour(void)
+{
+    s_tour_killed = true;
+}
+
+static void stop_scene_timer(void)
+{
+    s_scene_done = true;
+}
+
+static void focus_lens_set(void *value, int32_t progress)
+{
+    focus_motion_t *motion = value;
+    if (!motion || !motion->lens) return;
+    int32_t eased = ui_glass_spring(progress);
+    int32_t visual_y = ui_glass_interpolate(
+        motion->start_y, motion->target_y, eased);
+    int32_t visual_height = ui_glass_interpolate(
+        motion->start_height, motion->target_height, eased);
+    // Changing an object's real height on every animation tick repeatedly
+    // dirties LVGL layout and can starve the C3. Commit the fixed target height
+    // once in focus_move(), then animate only the draw-time expansion here.
+    int32_t transform_height =
+        (visual_height - motion->target_height) / 2;
+    lv_obj_set_y(motion->lens, visual_y + transform_height);
+    lv_obj_set_style_transform_height(
+        motion->lens, transform_height, LV_PART_MAIN);
+}
+
+static void focus_motion_finish(focus_motion_t *motion)
+{
+    if (!motion || !motion->lens) return;
+    lv_obj_set_y(motion->lens, motion->target_y);
+    lv_obj_set_height(motion->lens, motion->target_height);
+    lv_obj_set_style_transform_height(motion->lens, 0, LV_PART_MAIN);
+}
+
+static void stop_scene_activity(void)
+{
+    stop_scene_timer();
+    lv_anim_delete(&s_focus_motion, focus_lens_set);
+    s_focus_motion.lens = NULL;
+    lv_anim_delete(&s_segment_motion, segment_motion_set);
+    memset(&s_segment_motion, 0, sizeof(s_segment_motion));
+    if (s_morph.surface) {
+        lv_anim_delete(&s_morph, NULL);
+    }
+    memset(&s_morph, 0, sizeof(s_morph));
+    memset(&s_navigation, 0, sizeof(s_navigation));
+    memset(&s_feedback, 0, sizeof(s_feedback));
+    memset(s_adjustment_surfaces, 0, sizeof(s_adjustment_surfaces));
+    memset(s_adjustment_tints, 0, sizeof(s_adjustment_tints));
+    memset(s_adjustment_opacities, 0, sizeof(s_adjustment_opacities));
+    // 数据页的 view 指针随 scene 一起失效。refresh_data_page 靠 is_data_page
+    // 门禁已经不会碰它们，清零是第二道保险，让任何越过门禁的路径都撞 NULL 而不是野指针。
+    memset(&s_kaboo_view, 0, sizeof(s_kaboo_view));
+    memset(&s_claude_view, 0, sizeof(s_claude_view));
+    s_focus_lens = NULL;
+    s_focus_count = 0;
+    s_focus_page_hook = NULL;
+    s_player_state_label = NULL;
+    s_player_demo_label = NULL;
+    s_moments_result_label = NULL;
+    s_devices_result_label = NULL;
+    s_selection_canvas = NULL;
+    s_settings_note = NULL;
+    s_settings_range = NULL;
+    memset(s_settings_dividers, 0, sizeof(s_settings_dividers));
+    memset(s_focus_components, 0, sizeof(s_focus_components));
+}
+
+static void focus_refresh_states(void)
+{
+    for (uint8_t i = 0; i < s_focus_count; ++i) {
+        ui_glass_component_set_state(
+            &s_focus_components[i],
+            i == s_focus.index ? UI_GLASS_COMPONENT_FOCUSED
+                               : UI_GLASS_COMPONENT_DEFAULT,
+            theme());
+    }
+    if (s_focus_page_hook) s_focus_page_hook(s_focus.index);
+}
+
+static void focus_bind(lv_obj_t *lens, uint8_t count, uint8_t initial)
+{
+    s_focus_lens = lens;
+    s_focus_count = count;
+    ui_glass_focus_init(&s_focus, count, initial, true);
+    if (lens && count > 0) {
+        lv_obj_set_y(lens, s_focus_y[s_focus.index]);
+        lv_obj_set_height(lens, s_focus_h[s_focus.index]);
+        lv_obj_set_style_transform_height(lens, 0, LV_PART_MAIN);
+    }
+    focus_refresh_states();
+}
+
+static void focus_move(int8_t delta)
+{
+    if (!s_focus_lens || !ui_glass_focus_move(&s_focus, delta)) return;
+    focus_refresh_states();
+    // A press compresses the lens through transform_width/height, and the
+    // motion below drives transform_height too. Stop the press here so the two
+    // animations never write the same property; the motion starts from the
+    // lens's current (possibly compressed) height, so the path stays smooth.
+    lv_anim_delete(s_focus_lens, press_set);
+    if (lv_obj_get_style_transform_width(s_focus_lens, LV_PART_MAIN) != 0) {
+        lv_obj_set_style_transform_width(s_focus_lens, 0, 0);
+    }
+    // Rapid button input retargets the one physical lens from its current
+    // sampled position instead of allowing two animations to fight over it.
+    int32_t transform_height = lv_obj_get_style_transform_height(
+        s_focus_lens, LV_PART_MAIN);
+    int16_t start_y = (int16_t)(lv_obj_get_y(s_focus_lens) -
+                                transform_height);
+    int16_t start_height = (int16_t)(lv_obj_get_height(s_focus_lens) +
+                                     transform_height * 2);
+    lv_anim_delete(&s_focus_motion, focus_lens_set);
+    s_focus_motion = (focus_motion_t) {
+        .lens = s_focus_lens,
+        .start_y = start_y,
+        .target_y = s_focus_y[s_focus.index],
+        .start_height = start_height,
+        .target_height = s_focus_h[s_focus.index],
+    };
+    // One real size change per focus move is enough. Per-frame interpolation
+    // stays draw-only in focus_lens_set(), avoiding a layout pass per frame.
+    lv_obj_set_height(s_focus_lens, s_focus_motion.target_height);
+    focus_lens_set(&s_focus_motion, 0);
+    uint16_t duration = ui_glass_motion_duration(
+        s_runtime.mode, UI_GLASS_MOTION_FOCUS);
+    if (duration == 0) {
+        focus_motion_finish(&s_focus_motion);
+        return;
+    }
+    lv_anim_t animation;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, &s_focus_motion);
+    lv_anim_set_exec_cb(&animation, focus_lens_set);
+    lv_anim_set_values(&animation, 0, UI_GLASS_MOTION_PROGRESS_MAX);
+    lv_anim_set_duration(&animation, duration);
+    lv_anim_start(&animation);
+}
+
+static void press_set(void *object, int32_t inset)
+{
+    lv_obj_t *target = object;
+    if (!target) return;
+    lv_obj_set_style_transform_width(target, -inset, 0);
+    lv_obj_set_style_transform_height(target, -inset, 0);
+}
+
+static void width_set(void *object, int32_t width)
+{
+    if (object) lv_obj_set_width((lv_obj_t *)object, width);
+}
+
+static void animate_width(lv_obj_t *object, int32_t target_width)
+{
+    if (!object) return;
+    lv_anim_delete(object, width_set);
+    uint16_t duration = ui_glass_motion_duration(
+        s_runtime.mode, UI_GLASS_MOTION_FOCUS);
+    if (duration == 0) {
+        lv_obj_set_width(object, target_width);
+        return;
+    }
+    lv_anim_t animation;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, object);
+    lv_anim_set_exec_cb(&animation, width_set);
+    lv_anim_set_values(&animation, lv_obj_get_width(object), target_width);
+    lv_anim_set_duration(&animation, duration);
+    lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
+    lv_anim_start(&animation);
+}
+
+static uint8_t adjustment_clamp_step(uint8_t value, int8_t direction,
+                                     uint8_t minimum, uint8_t maximum,
+                                     uint8_t step)
+{
+    if (direction > 0) {
+        uint16_t next = (uint16_t)value + step;
+        return next > maximum ? maximum : (uint8_t)next;
+    }
+    return value <= (uint8_t)(minimum + step - 1u)
+               ? minimum
+               : (uint8_t)(value - step);
+}
+
+static uint8_t brightness_level_step(uint8_t value, int8_t direction)
+{
+    uint8_t count = (uint8_t)(sizeof(SHOWCASE_BRIGHTNESS_LEVELS) /
+                              sizeof(SHOWCASE_BRIGHTNESS_LEVELS[0]));
+    if (direction > 0) {
+        for (uint8_t index = 0; index < count; ++index) {
+            if (SHOWCASE_BRIGHTNESS_LEVELS[index] > value) {
+                return SHOWCASE_BRIGHTNESS_LEVELS[index];
+            }
+        }
+        return SHOWCASE_BRIGHTNESS_LEVELS[count - 1];
+    }
+    if (direction < 0) {
+        for (uint8_t index = count; index > 0; --index) {
+            if (SHOWCASE_BRIGHTNESS_LEVELS[index - 1] < value) {
+                return SHOWCASE_BRIGHTNESS_LEVELS[index - 1];
+            }
+        }
+        return SHOWCASE_BRIGHTNESS_LEVELS[0];
+    }
+    return value;
+}
+
+static void adjustments_glass_refresh(void)
+{
+    reference_glass_apply(
+        s_adjustment_surfaces[0], s_adjustment_tints[0],
+        s_adjustment_opacities[0], s_stepper_value);
+}
+
+static void audio_volume_task(void *context)
+{
+    (void)context;
+    esp_err_t error = bsp_audio_init();
+    bool ready = error == ESP_OK;
+    atomic_store(&s_audio_status, ready ? AUDIO_READY : AUDIO_UNAVAILABLE);
+    if (!ready) {
+        ESP_LOGE("showcase", "音频初始化失败，Controls 音量调节不可用: %s",
+                 esp_err_to_name(error));
+        vTaskDelete(NULL);
+        return;
+    }
+
+    for (;;) {
+        uint8_t volume;
+        if (xQueueReceive(s_audio_volume_queue, &volume, portMAX_DELAY) ==
+            pdTRUE) {
+            bsp_audio_set_volume(volume);
+        }
+    }
+}
+
+static void audio_volume_worker_start(void)
+{
+    if (s_audio_volume_queue) return;
+    s_audio_volume_queue = xQueueCreate(1, sizeof(uint8_t));
+    if (!s_audio_volume_queue) {
+        atomic_store(&s_audio_status, AUDIO_UNAVAILABLE);
+        ESP_LOGE("showcase", "无法创建音量调节队列");
+        return;
+    }
+    if (xTaskCreate(audio_volume_task, "audio_volume", 4096, NULL, 3,
+                    NULL) != pdPASS) {
+        atomic_store(&s_audio_status, AUDIO_UNAVAILABLE);
+        ESP_LOGE("showcase", "无法创建音量调节任务");
+        vQueueDelete(s_audio_volume_queue);
+        s_audio_volume_queue = NULL;
+        return;
+    }
+}
+
+static void audio_volume_set_async(uint8_t volume)
+{
+    if (s_audio_volume_queue) {
+        xQueueOverwrite(s_audio_volume_queue, &volume);
+    }
+}
+
+// Called only by the LVGL task (or with the LVGL lock held). The worker
+// publishes availability without retaining or touching any page objects.
+static void adjustments_audio_refresh(void)
+{
+    if (s_page != SHOWCASE_ADJUSTMENTS || !s_focus_components[2].value) return;
+    audio_status_t status = atomic_load(&s_audio_status);
+    ui_glass_component_t *volume = &s_focus_components[2];
+    char text[16];
+    if (status == AUDIO_READY) {
+        snprintf(text, sizeof(text), "%u%%", s_device_volume);
+    } else {
+        snprintf(text, sizeof(text), "%s",
+                 status == AUDIO_STARTING ? "Starting" : "Unavailable");
+    }
+    if (strcmp(lv_label_get_text(volume->value), text) == 0) return;
+    lv_label_set_text(volume->value, text);
+    lv_obj_set_style_text_color(volume->value,
+        lv_color_hex(status == AUDIO_UNAVAILABLE ? theme()->warning
+                                                : theme()->text_muted), 0);
+    lv_obj_set_style_opa(volume->indicator,
+                        status == AUDIO_READY ? LV_OPA_COVER : LV_OPA_30, 0);
+}
+
+// Economy 档的质量契约是「保位移、关扫光」（ui_glass_quality_profile 的
+// glint_enabled：Full/Balanced 开、Economy 关）。widgets 不持有 runtime，
+// 由场景层在 toggle / slider 两个触发点裁决：位移动画照常启动，随后撤掉
+// 拇指上的 glint 动画并隐藏。REDUCED_MOTION 已由 duration=0 隐式关 glint。
+static void thumb_cancel_glint_if_disabled(ui_glass_component_t *component)
+{
+    if (!ui_glass_quality_profile(s_runtime.quality.level)->glint_enabled) {
+        ui_glass_component_thumb_hide_glint(component);
+    }
+}
+
+static void adjustment_change(int8_t direction)
+{
+    if (s_focus.index == 0) {
+        uint8_t next = brightness_level_step(s_control_slider, direction);
+        if (next == s_control_slider) return;
+        s_control_slider = next;
+        bsp_display_backlight(s_control_slider);
+        ui_glass_slider_set_animated(
+            &s_focus_components[0], s_control_slider, theme(),
+            ui_glass_motion_duration(s_runtime.mode, UI_GLASS_MOTION_FOCUS));
+        thumb_cancel_glint_if_disabled(&s_focus_components[0]);
+    } else if (s_focus.index == 1) {
+        uint8_t next = adjustment_clamp_step(
+            s_stepper_value, direction, SHOWCASE_DEPTH_MIN,
+            SHOWCASE_DEPTH_MAX, SHOWCASE_DEPTH_STEP);
+        if (next == s_stepper_value) return;
+        s_stepper_value = next;
+        lv_label_set_text_fmt(s_focus_components[1].value, "%u",
+                              s_stepper_value);
+        adjustments_glass_refresh();
+    } else if (s_focus.index == 2) {
+        if (atomic_load(&s_audio_status) != AUDIO_READY) {
+            adjustments_audio_refresh();
+            return;
+        }
+        uint8_t next = adjustment_clamp_step(
+            s_device_volume, direction, SHOWCASE_VOLUME_MIN,
+            SHOWCASE_VOLUME_MAX, SHOWCASE_VOLUME_STEP);
+        if (next == s_device_volume) return;
+        s_device_volume = next;
+        lv_label_set_text_fmt(s_focus_components[2].value, "%u%%",
+                              s_device_volume);
+        animate_width(s_focus_components[2].indicator,
+                      168 * s_device_volume / 100);
+        audio_volume_set_async(s_device_volume);
+    }
+}
+
+// A component root is a transparent layout box: transform_width/height only
+// resize an object's own background, so compressing the root changed no pixels
+// while still redrawing the whole row every frame. Compress what the user
+// sees instead: the component's own control surface (a Moments button, the
+// Focus pill, toggle track or check mark) or, for text-only rows such as
+// Devices, the focus lens that marks the focused row.
+static lv_obj_t *press_target(void)
+{
+    if (s_focus.index >= s_focus_count) return NULL;
+    lv_obj_t *indicator = s_focus_components[s_focus.index].indicator;
+    return indicator ? indicator : s_focus_lens;
+}
+
+static void press_focused_component(void)
+{
+    lv_obj_t *object = press_target();
+    if (!object) return;
+    if (object == s_focus_lens && s_focus_motion.lens == s_focus_lens &&
+        lv_anim_get(&s_focus_motion, focus_lens_set)) {
+        // The lens motion also writes transform_height; land it first.
+        lv_anim_delete(&s_focus_motion, focus_lens_set);
+        focus_motion_finish(&s_focus_motion);
+    }
+    lv_anim_delete(object, press_set);
+    lv_anim_t animation;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, object);
+    lv_anim_set_exec_cb(&animation, press_set);
+    lv_anim_set_values(&animation, 0, 3);
+    lv_anim_set_duration(&animation, ui_glass_motion_duration(
+        s_runtime.mode, UI_GLASS_MOTION_PRESS));
+    lv_anim_set_playback_duration(&animation, 150);
+    lv_anim_set_path_cb(&animation, lv_anim_path_ease_out);
+    lv_anim_start(&animation);
+}
+
+static lv_obj_t *centered_label(lv_obj_t *parent, const char *text,
+                                const lv_font_t *font, uint32_t color)
+{
+    lv_obj_t *label = ui_glass_label(parent, text, font, color);
+    // Montserrat's line box is geometrically centered but its visible caps sit
+    // low inside short pills. A one-pixel optical correction keeps alphabetic
+    // labels and +/- glyphs centered on this 240x320 panel.
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, -1);
+    return label;
+}
+
+static ui_glass_component_t showcase_button_create(
+    lv_obj_t *parent, int y, const char *label, uint8_t style,
+    const ui_glass_theme_t *t)
+{
+    ui_glass_component_t component = { 0 };
+    component.root = plain_object(parent, 6, y, 196, 40);
+    lv_obj_t *button;
+    uint32_t text_color = t->text;
+    if (style == 0) {
+        button = solid_object(component.root, 6, 1, 184, 38,
+                              UI_GLASS_RADIUS_CONTROL,
+                              t->accent, LV_OPA_COVER);
+        text_color = t->content_surface;
+    } else if (style == 1) {
+        button = ui_glass_surface_create(
+            component.root, 6, 1, 184, 38, UI_GLASS_RADIUS_CONTROL,
+            t->control_tint,
+            t->control_opacity, t->control_material);
+    } else if (style == 2) {
+        button = solid_object(component.root, 6, 1, 184, 38,
+                              UI_GLASS_RADIUS_CONTROL,
+                              t->danger, LV_OPA_30);
+        text_color = t->danger;
+    } else {
+        button = solid_object(component.root, 6, 1, 184, 38,
+                              UI_GLASS_RADIUS_CONTROL,
+                              t->text_muted, LV_OPA_20);
+        text_color = t->text_muted;
+        lv_obj_set_style_opa(button, LV_OPA_50, 0);
+    }
+    centered_label(button, label, &lv_font_montserrat_14, text_color);
+    component.indicator = button;
+    return component;
+}
+
+static ui_glass_component_t showcase_segmented_create(
+    lv_obj_t *parent, int y, const ui_glass_theme_t *t)
+{
+    static const char *const labels[] = { "Work", "Rest", "Off" };
+    ui_glass_component_t component = { 0 };
+    component.root = plain_object(parent, 6, y, 196, 42);
+    lv_obj_t *platter = ui_glass_surface_create(
+        component.root, 6, 2, 184, 38, UI_GLASS_RADIUS_CONTROL, t->control_tint,
+        t->control_opacity, t->control_material);
+    // 底板不画三层光学边：它与 indicator 同心同半径、只内缩 3px，两组边会贴成
+    // "两重边框"。底板留半透明填充作凹槽，光学边只由选中的 indicator 承担。
+    ui_glass_surface_set_edge_strength(platter, 0);
+    component.auxiliary = platter;
+    // 选中块跟随主题的 control_material / 光学边强度：高对比与降透明模式下
+    // 凹槽底板已切 CONTRAST，选中块不能仍停在 REGULAR + 70% accent。
+    component.indicator = ui_glass_surface_create(
+        platter, UI_GLASS_OPTIC_RING_COUNT + s_segment_index * 59,
+        UI_GLASS_OPTIC_RING_COUNT, 58,
+        38 - UI_GLASS_OPTIC_RING_COUNT * 2, UI_GLASS_RADIUS_CONTROL,
+        t->accent, accessible_opacity(LV_OPA_70), t->control_material);
+    ui_glass_surface_set_edge_strength(component.indicator,
+                                       t->focus_edge_strength);
+    for (uint8_t i = 0; i < 3; ++i) {
+        lv_obj_t *label = text_at(platter, labels[i], 4 + i * 59, 10,
+                                  &lv_font_montserrat_14,
+                                  // 选中标签压在浅 accent 填充上，须用深色
+                                  // content_surface（与 showcase_button_create
+                                  // style 0 同一约定），近白 text 对比度不足。
+                                  i == s_segment_index
+                                      ? t->content_surface : t->text_muted);
+        lv_obj_set_width(label, 58);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    }
+    return component;
+}
+
+static void segment_motion_set(void *value, int32_t progress)
+{
+    segment_motion_t *motion = value;
+    if (!motion || !motion->indicator) return;
+    int32_t eased = ui_glass_spring(progress);
+    lv_obj_set_x(motion->indicator,
+                 ui_glass_interpolate(motion->start_x,
+                                      motion->target_x, eased));
+}
+
+static void segment_motion_finish(segment_motion_t *motion)
+{
+    if (!motion || !motion->indicator) return;
+    lv_obj_set_x(motion->indicator, motion->target_x);
+    ui_glass_surface_set_glint(motion->indicator, UI_GLASS_GLINT_HIDDEN);
+}
+
+static void segment_motion_completed(lv_anim_t *animation)
+{
+    segment_motion_finish(lv_anim_get_user_data(animation));
+}
+
+static void segment_select(uint8_t index, bool animate)
+{
+    if (index > 2 || !s_focus_components[0].indicator ||
+        !s_focus_components[0].auxiliary) {
+        return;
+    }
+    s_segment_index = index;
+    const ui_glass_theme_t *t = theme();
+    for (uint8_t item = 0; item < 3; ++item) {
+        lv_obj_t *label = lv_obj_get_child(
+            s_focus_components[0].auxiliary, (int32_t)item + 1);
+        set_label_color(label, item == index ? t->content_surface
+                                             : t->text_muted);
+    }
+
+    lv_anim_delete(&s_segment_motion, segment_motion_set);
+    s_segment_motion = (segment_motion_t) {
+        .indicator = s_focus_components[0].indicator,
+        .start_x = lv_obj_get_x(s_focus_components[0].indicator),
+        .target_x = (int16_t)(UI_GLASS_OPTIC_RING_COUNT + index * 59),
+    };
+    uint16_t duration = animate ? ui_glass_motion_duration(
+        s_runtime.mode, UI_GLASS_MOTION_FOCUS) : 0;
+    if (duration == 0) {
+        segment_motion_finish(&s_segment_motion);
+        return;
+    }
+
+    lv_anim_t motion;
+    lv_anim_init(&motion);
+    lv_anim_set_var(&motion, &s_segment_motion);
+    lv_anim_set_user_data(&motion, &s_segment_motion);
+    lv_anim_set_exec_cb(&motion, segment_motion_set);
+    lv_anim_set_values(&motion, 0, UI_GLASS_MOTION_PROGRESS_MAX);
+    lv_anim_set_duration(&motion, duration);
+    lv_anim_set_completed_cb(&motion, segment_motion_completed);
+    lv_anim_start(&motion);
+}
+
+static ui_glass_component_t showcase_choice_create(
+    lv_obj_t *parent, int y, const char *label, bool selected,
+    bool radio, const ui_glass_theme_t *t)
+{
+    ui_glass_component_t component = { 0 };
+    component.root = plain_object(parent, 6, y, 196, 42);
+    component.label = text_at(component.root, label, 48, 12,
+                              &lv_font_montserrat_14, t->text);
+    lv_obj_t *mark;
+    if (radio) {
+        mark = solid_object(component.root, 14, 10, 22, 22,
+                            LV_RADIUS_CIRCLE,
+                            selected ? t->accent : t->text_muted,
+                            selected ? LV_OPA_COVER : LV_OPA_30);
+    } else {
+        mark = solid_object(component.root, 14, 10, 22, 22,
+                            SHOWCASE_RADIUS_CHECKBOX_OUTER,
+                            selected ? t->accent : t->text_muted,
+                            selected ? LV_OPA_COVER : LV_OPA_30);
+    }
+    // 内点总是创建、未选中时隐藏：原地 setter（showcase_choice_set）需要一个
+    // 始终存在的对象来切换 HIDDEN，否则选中态切换只能整页重建。
+    lv_obj_t *dot;
+    if (radio) {
+        dot = solid_object(mark, 6, 6, 10, 10, LV_RADIUS_CIRCLE,
+                           t->content_surface, LV_OPA_COVER);
+    } else {
+        dot = solid_object(mark, 5, 5, 12, 12,
+                           SHOWCASE_RADIUS_CHECKBOX_INNER,
+                           t->content_surface, LV_OPA_COVER);
+    }
+    if (!selected) lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
+    component.indicator = mark;
+    component.auxiliary = dot;
+    return component;
+}
+
+// 原地切换 checkbox/radio 选中态，只改样式与内点可见性，不动对象树，
+// 因而焦点透镜不会因整页重建跳回第 0 行。写法参照 ui_glass_toggle_set。
+static void showcase_choice_set(ui_glass_component_t *component, bool selected,
+                                const ui_glass_theme_t *t)
+{
+    if (!component || !component->indicator || !component->auxiliary || !t) {
+        return;
+    }
+    ui_glass_set_bg_color_if_changed(component->indicator,
+                                     selected ? t->accent : t->text_muted);
+    ui_glass_set_bg_opa_if_changed(component->indicator,
+                                   selected ? LV_OPA_COVER : LV_OPA_30);
+    ui_glass_set_hidden_if_changed(component->auxiliary, !selected);
+}
+
+static ui_glass_component_t showcase_stepper_create(
+    lv_obj_t *parent, int y, const ui_glass_theme_t *t)
+{
+    ui_glass_component_t component = { 0 };
+    component.root = plain_object(parent, 6, y, 196, 44);
+    component.label = text_at(component.root, "Depth", 14, 13,
+                              &lv_font_montserrat_14, t->text);
+    lv_obj_t *minus = ui_glass_surface_create(
+        component.root, 108, 7, 30, 30, UI_GLASS_RADIUS_CONTROL,
+        t->control_tint,
+        t->control_opacity, t->control_material);
+    // 加号放在 root x155（stage 161..190）而不是对称的 160：Controls 透镜
+    // 收到 x13/w182 后右三环在 stage 列 192/193/194，加号外三环落在
+    // 188/189/190，还空出 col 191；旧 x160（stage 右缘 195）会越出新透镜。
+    // 数值恒为 0..4 一位数，root x143 起约 8px（143..150），两侧各空 4-5 列。
+    lv_obj_t *plus = ui_glass_surface_create(
+        component.root, 155, 7, 30, 30, UI_GLASS_RADIUS_CONTROL,
+        t->control_tint,
+        t->control_opacity, t->control_material);
+    // These two small controls sit inside the page focus lens. Keep their
+    // optical rims quieter than the lens so the stepper reads as one control
+    // instead of three competing glass outlines.
+    ui_glass_surface_set_edge_strength(minus, t->focus_edge_strength / 2);
+    ui_glass_surface_set_edge_strength(plus, t->focus_edge_strength / 2);
+    centered_label(minus, "-", &lv_font_montserrat_14, t->text);
+    centered_label(plus, "+", &lv_font_montserrat_14, t->text);
+    component.value = text_at(component.root, "0", 143, 13,
+                              &lv_font_montserrat_14, t->text);
+    lv_label_set_text_fmt(component.value, "%u", s_stepper_value);
+    return component;
+}
+
+static ui_glass_component_t showcase_progress_create(
+    lv_obj_t *parent, int y, const char *label, uint8_t percent,
+    const ui_glass_theme_t *t)
+{
+    ui_glass_component_t component = { 0 };
+    component.root = plain_object(parent, 6, y, 196, 44);
+    component.label = text_at(component.root, label, 14, 3,
+                              &lv_font_montserrat_14, t->text);
+    lv_obj_set_width(component.label, 70);
+    lv_label_set_long_mode(component.label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(component.label, lv_font_montserrat_14.line_height);
+    component.value = text_at(component.root, "0%", 90, 3,
+                              &lv_font_montserrat_14, t->text_muted);
+    lv_obj_set_width(component.value, 92);
+    lv_obj_set_style_text_align(component.value, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_label_set_long_mode(component.value, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(component.value, lv_font_montserrat_14.line_height);
+    lv_label_set_text_fmt(component.value, "%u%%", percent);
+    lv_obj_t *track = solid_object(component.root, 14, 29, 168, 6,
+                                   LV_RADIUS_CIRCLE, t->text_muted, LV_OPA_20);
+    component.indicator = solid_object(
+        track, 0, 0, 168 * percent / 100, 6, LV_RADIUS_CIRCLE,
+        t->accent, LV_OPA_COVER);
+    return component;
+}
+
+// Moments 页内焦点钩子。Share（页内 index 1）是本页唯一的玻璃按钮，它与焦点
+// 透镜同为 r14、间距仅 1-2px，两组三层 1px 光学环会贴成"双线"。Share 获焦时
+// 关掉它自身的光学边、由透镜独自承担（同 Focus segmented 底板的解法），离焦
+// 按建面时存下的原值恢复。上下两行是实色按钮，没有光学边，无须处理。
+static void moments_focus_edge_hook(uint8_t index)
+{
+    lv_obj_t *share = s_focus_components[1].indicator;
+    if (!share) return;
+    ui_glass_surface_set_edge_strength(
+        share, index == 1 ? 0 : s_moments_share_edge);
+}
+
+static void build_buttons(lv_obj_t *root)
+{
+    const ui_glass_theme_t *t = theme();
+    lv_obj_t *stage = showcase_content_stage_create(root, t);
+    lv_obj_t *art = solid_object(stage, 6, 6, 196, 70,
+                                 UI_GLASS_RADIUS_PANEL,
+                                 0x174B68, LV_OPA_COVER);
+    // 两块装饰都完整落在卡片 196x70 r18 的圆角轮廓之内：LVGL 只按父对象的
+    // 矩形包围盒裁剪子对象、不看 radius，越出卡片的形状会把所在的角切成直角。
+    // 不用 clip_corner：它要把卡片上下两条 r18 圆角带各画进一块 ARGB8888
+    // layer（196x18x4 ≈ 14 KB），重绘时从 48 KiB 的 LVGL 池里临时分配，而该池
+    // 同时承载本页全部对象，池耗尽曾让渲染任务死锁。所以由几何保证：
+    //  - 青色圆 60x60 与卡片顶边、右边相切（x136..195、y0..59）。半径 30
+    //    不小于角半径 18，相切的圆在右上角处始终位于 r18 圆弧内侧，碰不到角。
+    //    左缘与 "Night Drive" 的末字留出约 5 px：只隔一两个像素会读成不小心
+    //    蹭上，而不是有意的构图。
+    //  - 靛蓝带要贴住左下角，所以取同一个 r18，左边和底边都与卡片对齐，
+    //    两段圆弧逐像素重合。带高至少 36 = 2*18，否则 LVGL 把半径压到短边
+    //    的一半，更尖的角会探出卡片圆弧。带顶 y34 紧贴 "Night Drive" 行框
+    //    （y12..33）之下，"Demo | 12 moments"（y42..57）落在带内。
+    solid_object(art, 136, 0, 60, 60, LV_RADIUS_CIRCLE,
+                 0x5AC8E8, LV_OPA_40);
+    solid_object(art, 0, 34, 120, 36, UI_GLASS_RADIUS_PANEL,
+                 0x343873, LV_OPA_80);
+    text_at(art, "Night Drive", 14, 12,
+            &lv_font_montserrat_20, t->text);
+    s_moments_result_label = text_at(art, "Demo | 12 moments", 15, 42,
+            &lv_font_montserrat_14, t->text_muted);
+    lv_obj_set_width(s_moments_result_label, 174);
+    lv_label_set_long_mode(s_moments_result_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(s_moments_result_label, lv_font_montserrat_14.line_height);
+
+    // 透镜与每行 root 同高（h40）、行距 41：面在 root 内 y+1..y+38，透镜
+    // y..y+39，上下各 1px halo，三行严格对称。透镜仍是 x10/w188，比 184px
+    // 胶囊左右各多 2px halo；更宽的 196px 透镜会露出嵌套药丸。
+    // 关键是纵向不能与 Share（第 1 行，唯一玻璃面）共扫描行。Share 面在
+    // stage 行 121..158，三组光学环占 121/122/123 与 156/157/158：
+    //  - 透镜停第 0 行（79..118）底三环 116/117/118，与 Share 顶环空
+    //    119/120 两行；
+    //  - 透镜停第 2 行（161..200）顶三环 161/162/163，与 Share 底环空
+    //    159/160 两行。
+    // 旧几何行距 40、透镜 h42 时停第 0 行的底外环正好落在 Share 顶外环
+    // （同 120 行），相邻行读成双线。透镜正压 Share（停第 1 行）时仍由
+    // moments_focus_edge_hook 关掉 Share 自己的边，不靠几何避让。
+    // 边界：顶外环行 79 离 art 卡底行 75 空 3 行；底外环行 200 离 204 高的
+    // stage 底边空 3 行，第 2 行的面（底 199）与透镜都不溢出。
+    lv_obj_t *lens = ui_glass_focus_lens_create(stage, 10, 79, 188, 40, t);
+    static const char *const labels[] = {
+        "Open moment", "Share", "Remove", NULL,
+    };
+    for (uint8_t i = 0; i < 3; ++i) {
+        s_focus_y[i] = 79 + i * 41;
+        s_focus_h[i] = 40;
+        s_focus_components[i] = showcase_button_create(
+            stage, s_focus_y[i], labels[i], i, t);
+    }
+    // 记下 Share 玻璃面建面时的 edge_strength（随 control_material 变化），
+    // 供页内焦点钩子离焦恢复。
+    s_moments_share_edge =
+        ui_glass_surface_get_edge_strength(s_focus_components[1].indicator);
+    s_focus_page_hook = moments_focus_edge_hook;
+    focus_bind(lens, 3, 0);
+}
+
+static void build_selection(lv_obj_t *root)
+{
+    const ui_glass_theme_t *t = theme();
+    s_selection_canvas = quiet_canvas_create(
+        root, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH, 228,
+        t->content_surface,
+        accessible_opacity(s_selection_check ? 160 : 64));
+    lv_obj_t *stage = content_layer_create(root, 16, 4, 208, 204, t);
+    // The first row already contains a glass segmented platter. Keep the
+    // shared focus halo close to that platter instead of drawing a second,
+    // substantially wider capsule around it.
+    lv_obj_t *lens = ui_glass_focus_lens_create(stage, 10, 6, 188, 42, t);
+    content_divider_create(stage, 51, t);
+    content_divider_create(stage, 99, t);
+    content_divider_create(stage, 147, t);
+    s_focus_y[0] = 6;
+    s_focus_y[1] = 54;
+    s_focus_y[2] = 102;
+    s_focus_y[3] = 150;
+    s_focus_h[0] = 42;
+    s_focus_h[1] = 42;
+    s_focus_h[2] = 42;
+    s_focus_h[3] = 42;
+    s_focus_components[0] = showcase_segmented_create(stage, 6, t);
+    s_focus_components[1] = ui_glass_toggle_create(
+        stage, 6, 54, 196, 42, "Silence alerts", s_control_toggle, t);
+    s_focus_components[2] = showcase_choice_create(
+        stage, 102, "Dim wallpaper", s_selection_check, false, t);
+    s_focus_components[3] = showcase_choice_create(
+        stage, 150, "Auto resume", s_selection_radio, false, t);
+    focus_bind(lens, 4, 0);
+}
+
+static void build_adjustments(lv_obj_t *root)
+{
+    const ui_glass_theme_t *t = theme();
+    lv_obj_t *stage = showcase_content_stage_create(root, t);
+    // The local glass group is both legibility carrier and a live depth
+    // preview. Its high base opacity keeps the fine tracks readable while
+    // reference_glass_apply updates tint and edge strength without a rebuild.
+    uint8_t group_opacity = content_group_opacity();
+    s_adjustment_opacities[0] = group_opacity;
+    s_adjustment_surfaces[0] = reference_glass_create(
+        stage, 6, 4, 196, 164, UI_GLASS_RADIUS_PANEL, group_opacity,
+        s_stepper_value, t, &s_adjustment_tints[0]);
+    content_divider_create(stage, 58, t);
+    content_divider_create(stage, 113, t);
+    // 透镜相对合并底板四向内缩：两者都画三层 1px 光学环，环列重合会逐像素
+    // 贴成"双线"。底板三环列 6/7/8 与 199/200/201，透镜 x13/w182 的三环列
+    // 13/14/15 与 192/193/194，左右各空 4 列（9..12、195..198）。步进器加号
+    // 已先左移到 stage 161..190，最宽可见内容（加号外环 190、滑块拇指 100%
+    // 时外环 189、进度轨道 187）都在透镜内。
+    // 三停留位 y10/65/120、h42：滑块拇指底三环行 44/45/46 与透镜底内环行 49
+    // 之间空 47/48 两行；首尾停留位离底板上下三环仍各 3 空行（7..9、162..164）。
+    // 行距 55，相邻停留位之间空 13 行，发丝线落在 58、113 正中。
+    lv_obj_t *lens = ui_glass_focus_lens_create(stage, 13, 10, 182, 42, t);
+    s_focus_y[0] = 10;
+    s_focus_y[1] = 65;
+    s_focus_y[2] = 120;
+    s_focus_h[0] = 42;
+    s_focus_h[1] = 42;
+    s_focus_h[2] = 42;
+    s_focus_components[0] = ui_glass_slider_create(
+        stage, 6, 8, 196, 44, "Brightness", s_control_slider, t);
+    s_focus_components[1] = showcase_stepper_create(stage, 64, t);
+    s_focus_components[2] = showcase_progress_create(
+        stage, 120, "Volume", s_device_volume, t);
+    focus_bind(lens, 3, 0);
+    adjustments_audio_refresh();
+}
+
+static void build_lists(lv_obj_t *root)
+{
+    static const char *const labels[] = {
+        "Passport Buds", "Studio Display", "MacBook", "Keyboard",
+    };
+    static const char *const values[] = {
+        "LINKED", "NEARBY", "SLEEP", "OFFLINE",
+    };
+    const ui_glass_theme_t *t = theme();
+    lv_obj_t *stage = showcase_content_stage_create(root, t);
+    lv_obj_t *lens = ui_glass_focus_lens_create(stage, 6, 10, 196, 42, t);
+    // 行距 48（原 47）：相邻透镜边之间有 6 个空扫描行，发丝线落在间隙正中
+    // （1px 线无法对偶数间隙严格中分，按 build_selection 约定向上取整），
+    // 与上、下两条外环分别隔 3、2 个空扫描行；原 47 行距时只有 1、3。
+    content_divider_create(stage, 55, t);
+    content_divider_create(stage, 103, t);
+    content_divider_create(stage, 151, t);
+    for (uint8_t i = 0; i < 4; ++i) {
+        s_focus_y[i] = 10 + i * 48;
+        s_focus_h[i] = 42;
+        s_focus_components[i] = ui_glass_row_create(
+            stage, 6, s_focus_y[i], 196, 42, labels[i], values[i], t);
+        // Keep full names and connection states on separate baselines.
+        lv_obj_set_width(s_focus_components[i].label, 172);
+        lv_label_set_long_mode(s_focus_components[i].label, LV_LABEL_LONG_DOT);
+        lv_obj_set_height(s_focus_components[i].label, lv_font_montserrat_14.line_height);
+        lv_obj_align(s_focus_components[i].label, LV_ALIGN_TOP_LEFT, 12, 2);
+        lv_obj_set_width(s_focus_components[i].value, 172);
+        lv_obj_align(s_focus_components[i].value, LV_ALIGN_TOP_LEFT, 12, 22);
+        lv_obj_set_style_text_align(s_focus_components[i].value, LV_TEXT_ALIGN_LEFT, 0);
+    }
+    s_devices_result_label = text_at(root, "Demo devices | OK: select", 28, 204,
+                                     &lv_font_montserrat_14, t->text_muted);
+    focus_bind(lens, 4, 0);
+}
+
+static void morph_menu_refresh(bool animate)
+{
+    const ui_glass_theme_t *t = theme();
+    for (uint8_t i = 0; i < 3; ++i) {
+        uint32_t color = i == s_morph.item ? t->text : t->text_muted;
+        set_label_color(s_morph.menu_rows[i], color);
+    }
+    if (!s_morph.highlight) return;
+    int16_t target_y = (int16_t)(48 + s_morph.item * 44);
+    if (!animate) {
+        lv_obj_set_y(s_morph.highlight, target_y);
+        return;
+    }
+    lv_anim_delete(&s_focus_motion, focus_lens_set);
+    s_focus_motion = (focus_motion_t) {
+        .lens = s_morph.highlight,
+        .start_y = lv_obj_get_y(s_morph.highlight),
+        .target_y = target_y,
+        .start_height = lv_obj_get_height(s_morph.highlight),
+        .target_height = lv_obj_get_height(s_morph.highlight),
+    };
+    uint16_t duration = ui_glass_motion_duration(
+        s_runtime.mode, UI_GLASS_MOTION_FOCUS);
+    if (duration == 0) {
+        focus_motion_finish(&s_focus_motion);
+        return;
+    }
+    lv_anim_t animation;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, &s_focus_motion);
+    lv_anim_set_exec_cb(&animation, focus_lens_set);
+    lv_anim_set_values(&animation, 0, UI_GLASS_MOTION_PROGRESS_MAX);
+    lv_anim_set_duration(&animation, duration);
+    lv_anim_start(&animation);
+}
+
+static uint8_t opacity_from_range(int32_t progress, int32_t start,
+                                  int32_t end)
+{
+    if (progress <= start) return 0;
+    if (progress >= end) return 255;
+    return (uint8_t)((progress - start) * 255 / (end - start));
+}
+
+static void morph_set(void *value, int32_t progress)
+{
+    morph_view_t *morph = value;
+    if (!morph || !morph->surface) return;
+    int32_t eased = ui_glass_spring(progress);
+    int32_t visual_eased = ui_glass_ease_out_cubic(progress);
+    ui_glass_morph_frame_t frame = ui_glass_morph_interpolate(
+        morph->from, morph->to, eased);
+    lv_obj_set_pos(morph->surface, frame.x, frame.y);
+    lv_obj_set_size(morph->surface, frame.width, frame.height);
+    lv_obj_set_style_radius(morph->surface, frame.radius, 0);
+    int32_t openness = morph->target_open
+                           ? visual_eased
+                           : UI_GLASS_MOTION_PROGRESS_MAX - visual_eased;
+    morph->visual_depth = (uint8_t)(openness * 4 /
+                                    UI_GLASS_MOTION_PROGRESS_MAX);
+    /* Optics are suppressed during the morph, so edge_strength writes and
+       invalidate_perimeter() are pure waste — skip them entirely.  The tint
+       colour depends only on depth (0..4, changes ~4 times per animation);
+       when depth is stable we skip the three mix_rgb calls and the
+       bg_color style write, updating only bg_opa which is the sole value
+       that changes every frame.  morph_finish restores the full state. */
+    if (morph->visual_depth != morph->last_depth) {
+        uint8_t d = morph->visual_depth;
+        uint32_t top = ui_glass_mix_rgb(morph->base_tint, 0xE9F8FF,
+                                        (uint8_t)(28 + d * 5));
+        uint32_t bottom = ui_glass_mix_rgb(morph->base_tint, 0x03101C,
+                                           (uint8_t)(34 + d * 4));
+        uint32_t fill = ui_glass_mix_rgb(top, bottom, 116);
+        lv_obj_set_style_bg_color(morph->surface, lv_color_hex(fill), 0);
+        morph->last_depth = d;
+    }
+    ui_glass_set_bg_opa_if_changed(
+        morph->surface,
+        accessible_opacity(opacity_clamp(frame.opacity +
+                                         morph->visual_depth * 2)));
+    if (morph->shadow) {
+        // 阴影留在半透明 surface 覆盖范围内，只透出纵深，不再把等大圆角轮廓
+        // 向下探出菜单外缘；否则展开态会被读成 Quick Actions 的第二重边。
+        const int16_t shadow_inset = 2;
+        const int16_t drop = 2;
+        lv_obj_set_pos(morph->shadow, frame.x + shadow_inset,
+                       frame.y + drop);
+        lv_obj_set_size(morph->shadow,
+                        frame.width - shadow_inset * 2,
+                        frame.height - shadow_inset * 2);
+        lv_obj_set_style_radius(morph->shadow, frame.radius, 0);
+        lv_obj_set_style_bg_opa(
+            morph->shadow,
+            (lv_opa_t)(24 + openness * 28 /
+                       UI_GLASS_MOTION_PROGRESS_MAX), 0);
+    }
+    // 快捷菜单展开/收起不跑扫光：从左到右的 glint 高光在这块 192x190 玻璃面上
+    // 既显眼又昂贵，用户不需要。glint 始终隐藏，morph_toggle 期间另抑制光学边。
+
+    uint8_t menu_opacity = morph->target_open
+                               ? opacity_from_range(progress, 330, 760)
+                               : (uint8_t)(255 -
+                                   opacity_from_range(progress, 100, 500));
+    uint8_t button_opacity = (uint8_t)(255 - menu_opacity);
+    // These opacities sit at 0 or 255 for most of the motion; an unchanged
+    // write would still redraw the whole menu or content every frame.
+    ui_glass_set_opa_if_changed(morph->menu, menu_opacity);
+    ui_glass_set_opa_if_changed(morph->button_label, button_opacity);
+    // The full-screen dimmer is deliberately not animated here: every opacity
+    // step repainted all 76,800 pixels on every frame of the morph. It only
+    // changes at rest in morph_finish(), whose full-screen redraw already
+    // restores the optics, so the resting looks are unchanged.
+    if (morph->context) {
+        // The content is fully gone before the menu becomes readable and only
+        // returns after the closing menu is nearly gone. A linear crossfade
+        // put both titles near 50% at the midpoint and produced visible text
+        // collisions even though the geometry itself was continuous.
+        ui_glass_set_opa_if_changed(
+            morph->context,
+            (lv_opa_t)(255 - opacity_from_range(openness, 80, 240)));
+    }
+}
+
+static void morph_finish(morph_view_t *morph)
+{
+    if (!morph) return;
+    morph->open = morph->target_open;
+    morph->animating = false;
+    morph_set(morph, UI_GLASS_MOTION_PROGRESS_MAX);
+    if (morph->surface) {
+        // T4 已定案（候选②）：base_tint 只在建面时按折叠态中心借一次壁纸色，
+        // 展开后中心从绝对 y≈80 移到 y≈151 也不重借——同一块玻璃在 morph 全程
+        // 携带同一材质身份，静止瞬间填充不能"跳"一下。实测两锚点借色虽差到
+        // B 通道 21（0x011B53→0x011B3E），但借色只占 tint 的 91/255≈36%，传到
+        // depth=4 的最终 fill 后 8-bit 差 ≤5；四套主题全部量化成同一个 RGB565
+        // 字（Standard/ReducedMotion 0x435A75、HighContrast 0x2C435E、
+        // ReduceTransp 0x273E57），即以 150 opa 叠到壁纸上的可见像素也逐位相同。
+        // 重借（候选①）要么在 morph_finish 产生一次整面 fill 跳变，要么得在
+        // morph_set 的 depth 分档里加交叉混合，二者都是零收益复杂度。随位置走
+        // 的视觉由边承担：三层环与高光段每帧按实时 bounds 重采壁纸
+        // （surface_draw 的 top/bottom_sample）。
+        reference_glass_apply(morph->surface, morph->base_tint,
+                              morph->to.opacity, morph->visual_depth);
+        ui_glass_surface_set_glint(morph->surface, UI_GLASS_GLINT_HIDDEN);
+    }
+    if (morph->dimmer) {
+        // The dimmer only follows the resting state (see morph_set()). The
+        // full-screen invalidation below repaints it, so switching it here
+        // costs no additional redraw.
+        ui_glass_set_bg_opa_if_changed(
+            morph->dimmer,
+            morph->open ? PLAYER_DIMMER_OPA : LV_OPA_TRANSP);
+    }
+    // 恢复动画期间被抑制的光学边，并整屏失效重绘一次干净的静止态。
+    ui_glass_set_optics_suppressed(false);
+    if (s_runtime.screen) lv_obj_invalidate(s_runtime.screen);
+}
+
+static void morph_completed(lv_anim_t *animation)
+{
+    morph_finish(lv_anim_get_user_data(animation));
+}
+
+static void morph_toggle(void)
+{
+    if (!s_morph.surface || s_morph.animating) return;
+    // 折叠态 36x36 + RADIUS_PANEL(18)：18 恰为边长一半，LVGL 钳制后静止即
+    // 正圆；插值 18↔22(FLOATING) 全程数值，LV_RADIUS_CIRCLE 不进 morph 路径。
+    // 收进信息卡内右上角 y=18（绝对 y[62,98)），曲名下移后与按钮底留 6px。
+    ui_glass_morph_frame_t collapsed = {
+        .x = 178, .y = 18, .width = 36, .height = 36,
+        .radius = UI_GLASS_RADIUS_PANEL, .opacity = 148,
+    };
+    ui_glass_morph_frame_t expanded = {
+        .x = 26, .y = 12, .width = 192, .height = 190,
+        .radius = UI_GLASS_RADIUS_FLOATING, .opacity = 142,
+    };
+    s_morph.target_open = !s_morph.open;
+    s_morph.from = s_morph.open ? expanded : collapsed;
+    s_morph.to = s_morph.open ? collapsed : expanded;
+    s_morph.animating = true;
+    s_morph.last_depth = 0xFF;
+
+    uint16_t duration = ui_glass_motion_duration(
+        s_runtime.mode, UI_GLASS_MOTION_MORPH);
+    if (duration == 0) {
+        morph_finish(&s_morph);
+        return;
+    }
+    // 展开态是 192x190 大玻璃面，逐帧重绘三层光学边是卡顿主因。动画期间抑制
+    // 光学边（同页面转场手法），morph_finish 结束时恢复并整屏重绘。
+    ui_glass_set_optics_suppressed(true);
+    lv_anim_t animation;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, &s_morph);
+    lv_anim_set_user_data(&animation, &s_morph);
+    lv_anim_set_exec_cb(&animation, morph_set);
+    lv_anim_set_values(&animation, 0, UI_GLASS_MOTION_PROGRESS_MAX);
+    lv_anim_set_duration(&animation, duration);
+    lv_anim_set_completed_cb(&animation, morph_completed);
+    lv_anim_start(&animation);
+}
+
+static void build_overlays(lv_obj_t *root)
+{
+    const ui_glass_theme_t *t = theme();
+    lv_obj_t *scene = lv_obj_get_parent(root);
+    // 216 px is exactly the cards plus the status line (bottom at 213). The
+    // Quick Actions morph fades this container, and LVGL redraws the whole
+    // container box, so extra empty height is repainted on every fade frame.
+    lv_obj_t *content = content_layer_create(root, 14, 6, 212, 216, t);
+    s_morph.context = content;
+    // 信息卡加高到 92 收纳右上角圆形快捷按钮；曲名下移到按钮下方避开遮挡。
+    solid_object(content, 0, 8, 212, 92, UI_GLASS_RADIUS_PANEL,
+                 0x00101C, accessible_opacity(LV_OPA_30));
+    text_at(content, "Demo Player", 16, 14,
+            &lv_font_montserrat_14, t->text_muted);
+    text_at(content, "Midnight Current", 16, 54,
+            &lv_font_montserrat_20, t->text);
+    s_player_state_label = text_at(
+        content, s_player_playing ? "Playing  |  24 min"
+                                  : "Paused  |  24 min",
+        16, 78, &lv_font_montserrat_14, t->text_muted);
+
+    // 波形卡减高到 84 并下移，把匀出的高度让给上方信息卡。
+    lv_obj_t *art = solid_object(content, 0, 108, 212, 84,
+                                 UI_GLASS_RADIUS_PANEL,
+                                 0x0E4669, LV_OPA_COVER);
+    lv_obj_t *orb = solid_object(art, 15, 8, 68, 68, LV_RADIUS_CIRCLE,
+                                 t->accent, 88);
+    lv_obj_t *audio = ui_glass_label(
+        orb, LV_SYMBOL_AUDIO, &lv_font_montserrat_20, t->text);
+    lv_obj_center(audio);
+    static const uint8_t bar_heights[] = { 22, 48, 60, 34 };
+    for (uint8_t i = 0; i < sizeof(bar_heights); ++i) {
+        int height = bar_heights[i];
+        solid_object(art, 108 + i * 14, 42 - height / 2,
+                     5, height, LV_RADIUS_CIRCLE,
+                     t->text, i == 2 ? 230 : 126);
+    }
+    // Quick Actions 的演示结果显示在这一行，选择前为空。连接状态只由 header
+    // 的链路点表示，这里不再重复。行位避开播放器卡片和 footer。
+    s_player_demo_label = text_at(content, "", 16, 198,
+                                   &lv_font_montserrat_14, t->text_muted);
+
+    s_morph.dimmer = solid_object(scene, 0, 0,
+                                  240, LIQUID_GLASS_COMPOSITOR_HEIGHT,
+                                  0, 0x00040A, LV_OPA_TRANSP);
+    lv_obj_t *overlay = plain_object(
+        scene, 0, SHOWCASE_SCENE_Y,
+        LIQUID_GLASS_COMPOSITOR_WIDTH, SHOWCASE_SCENE_HEIGHT);
+    s_morph.shadow = solid_object(overlay, 180, 20, 32, 32,
+                                  UI_GLASS_RADIUS_PANEL, 0x01070D, 24);
+    s_morph.surface = reference_glass_create(
+        overlay, 178, 18, 36, 36, UI_GLASS_RADIUS_PANEL,
+        148, 0, t, &s_morph.base_tint);
+    s_morph.button_label = ui_glass_label(
+        s_morph.surface, LV_SYMBOL_LIST, &lv_font_montserrat_14, t->text);
+    lv_obj_center(s_morph.button_label);
+
+    s_morph.menu = plain_object(s_morph.surface, 0, 0, 192, 190);
+    lv_obj_set_style_opa(s_morph.menu, LV_OPA_TRANSP, 0);
+    text_at(s_morph.menu, "Demo Actions", 18, 16,
+            &lv_font_montserrat_20, t->text);
+    s_morph.highlight = solid_object(
+        s_morph.menu, 8, 48, 176, 38, UI_GLASS_RADIUS_CONTROL,
+        t->accent, 38);
+    static const char *const rows[] = {
+        LV_SYMBOL_BLUETOOTH "   Connect",
+        LV_SYMBOL_AUDIO "   Sound",
+        LV_SYMBOL_POWER "   Sleep",
+    };
+    for (uint8_t i = 0; i < 3; ++i) {
+        s_morph.menu_rows[i] = text_at(
+            s_morph.menu, rows[i], 20, 58 + i * 44,
+            &lv_font_montserrat_14, t->text);
+    }
+    s_morph.item = 0;
+    s_morph.visual_depth = 0;
+    morph_menu_refresh(false);
+}
+
+static void navigation_clock_refresh(void)
+{
+    if (!s_navigation.state_label || !s_navigation.value_label) return;
+
+    // 零初始化：未同步时 time_sync_get_wall_clock 不写 now，而下面仍会把
+    // now.hour 交给 ui_dashboard_greeting（它在 synced=false 时忽略该值）。
+    time_sync_wall_clock_t now = { 0 };
+    char time_text[8];
+    char date_text[24];
+    bool synced = time_sync_get_wall_clock(&now);
+    if (synced) {
+        static const char *const weekdays[] = {
+            "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat",
+        };
+        snprintf(time_text, sizeof(time_text), "%02d:%02d",
+                 now.hour, now.minute);
+        snprintf(date_text, sizeof(date_text), "%04d/%02d/%02d %s",
+                 now.year, now.month, now.day, weekdays[now.weekday]);
+    } else {
+        // Until the first computer or NTP sync, avoid presenting the Unix
+        // epoch as a real date. The system clock continues from the last
+        // persisted value when one is available.
+        snprintf(time_text, sizeof(time_text), "--:--");
+        snprintf(date_text, sizeof(date_text), "----/--/-- ---");
+    }
+
+    if (strcmp(lv_label_get_text(s_navigation.state_label), time_text) != 0) {
+        lv_label_set_text(s_navigation.state_label, time_text);
+    }
+    if (strcmp(lv_label_get_text(s_navigation.value_label), date_text) != 0) {
+        lv_label_set_text(s_navigation.value_label, date_text);
+    }
+
+    // 每个 tick（SHOWCASE_TICK_MS）顺带刷新问候语，跨整点才会自动改口。
+    if (s_navigation.title) {
+        const char *greeting = ui_dashboard_greeting(now.hour, synced);
+        if (strcmp(lv_label_get_text(s_navigation.title), greeting) != 0) {
+            lv_label_set_text(s_navigation.title, greeting);
+        }
+    }
+}
+
+static void navigation_battery_refresh(void)
+{
+    if (!s_navigation.battery_ring || !s_navigation.battery_percent) return;
+    int battery = atomic_load(&s_battery_soc);
+    int visible = battery >= 0 ? battery : 0;
+    if (lv_arc_get_value(s_navigation.battery_ring) != visible) {
+        lv_arc_set_value(s_navigation.battery_ring, visible);
+    }
+    char percent_text[8];
+    if (battery < 0) {
+        strcpy(percent_text, "--%");
+    } else {
+        uint8_t battery_value = (uint8_t)battery;
+        snprintf(percent_text, sizeof(percent_text), "%u%%",
+                 (unsigned)battery_value);
+    }
+    if (strcmp(lv_label_get_text(s_navigation.battery_percent), percent_text) != 0) {
+        lv_label_set_text(s_navigation.battery_percent, percent_text);
+    }
+}
+
+// Home 只有一张状态卡：问候语，以及电量圆环加时间/日期。音乐与连接状态分别由
+// Player 页和 header 的链路点承担，这里不再重复。
+static void build_navigation(lv_obj_t *root)
+{
+    const ui_glass_theme_t *t = theme();
+    lv_obj_t *panel = content_layer_create(root, 14, 6, 212, 152, t);
+    // 标题卡与 hero 用满 212 宽，与 footer 左右对齐（绝对范围都是 14..226）。
+    // 缩进会让上下两组差 16px，肉眼很明显。
+    solid_object(panel, 0, 8, 212, 60,
+                 UI_GLASS_RADIUS_PANEL, 0x00101C, accessible_opacity(LV_OPA_20));
+    // 标题是跟随时钟的问候语，由 navigation_clock_refresh() 设置。
+    s_navigation.title = text_at(panel, "", 16, 18,
+                                 &lv_font_montserrat_20, t->text);
+    s_navigation.subtitle = text_at(panel, "Demo | Ready for today", 16, 47,
+                                    &lv_font_montserrat_14, t->text_muted);
+
+    // hero 与上方标题卡同宽同圆角，底边在 panel 内 rel 152，即 root y=158。
+    s_navigation.hero = ui_glass_surface_create(
+        panel, 0, 76, 212, 76, UI_GLASS_RADIUS_PANEL,
+        0x3B93C5, accessible_opacity(LV_OPA_COVER), t->control_material);
+    // The hero is an opaque content card, but its perimeter still needs the
+    // same restrained optical cue as the surrounding floating surfaces.
+    ui_glass_surface_set_edge_strength(s_navigation.hero,
+                                       t->focus_edge_strength / 2);
+    s_navigation.battery_ring = lv_arc_create(s_navigation.hero);
+    lv_obj_set_pos(s_navigation.battery_ring, 14, 14);
+    lv_obj_set_size(s_navigation.battery_ring, 56, 56);
+    lv_obj_remove_flag(s_navigation.battery_ring, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_opa(s_navigation.battery_ring, LV_OPA_TRANSP,
+                            LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_navigation.battery_ring, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(s_navigation.battery_ring, 0, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_navigation.battery_ring, 4, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(s_navigation.battery_ring,
+                               lv_color_hex(t->text_muted), LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(s_navigation.battery_ring, LV_OPA_50,
+                             LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_navigation.battery_ring, 4,
+                               LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(s_navigation.battery_ring,
+                               lv_color_hex(t->accent), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_opa(s_navigation.battery_ring, LV_OPA_COVER,
+                             LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(s_navigation.battery_ring, LV_OPA_TRANSP,
+                            LV_PART_KNOB);
+    lv_obj_set_style_border_width(s_navigation.battery_ring, 0, LV_PART_KNOB);
+    lv_arc_set_range(s_navigation.battery_ring, 0, 100);
+    lv_arc_set_bg_angles(s_navigation.battery_ring, 135, 405);
+    lv_arc_set_angles(s_navigation.battery_ring, 135, 135);
+
+    s_navigation.battery_percent = text_at(
+        s_navigation.hero, "--%", 14, 32, &lv_font_montserrat_14, t->text);
+    lv_obj_set_size(s_navigation.battery_percent, 56, 20);
+    lv_obj_set_style_text_align(s_navigation.battery_percent,
+                                LV_TEXT_ALIGN_CENTER, 0);
+    // 时间是这张卡的主信息，用与问候语同级的 montserrat_20。
+    // 20px 行高 22 + 6px 间隙 + 14px 行高 16 = 44，块中心落在 42，
+    // 与电量环（hero 内 14..70）的中心一致。
+    s_navigation.state_label = text_at(
+        s_navigation.hero, "", 88, 20, &lv_font_montserrat_20, t->text);
+    lv_obj_set_width(s_navigation.state_label, 116);
+    s_navigation.value_label = text_at(
+        s_navigation.hero, "", 88, 48, &lv_font_montserrat_14, t->text_muted);
+    lv_obj_set_width(s_navigation.value_label, 116);
+    lv_label_set_long_mode(s_navigation.value_label, LV_LABEL_LONG_DOT);
+
+    navigation_clock_refresh();
+    navigation_battery_refresh();
+}
+
+static lv_obj_t *feedback_chip(lv_obj_t *parent, int x, int y, int width,
+                               const char *label, uint32_t color,
+                               lv_obj_t **label_out,
+                               const ui_glass_theme_t *t)
+{
+    lv_obj_t *chip = ui_glass_surface_create(
+        parent, x, y, width, 28, LV_RADIUS_CIRCLE, color,
+        accessible_opacity(LV_OPA_30), t->control_material);
+    // Status chips are passive feedback. A light rim gives them a glass
+    // identity without competing with the interactive focus lens.
+    ui_glass_surface_set_edge_strength(chip, t->focus_edge_strength / 3);
+    lv_obj_t *text = centered_label(
+        chip, label, &lv_font_montserrat_14, color);
+    if (label_out) *label_out = text;
+    return chip;
+}
+
+static void feedback_refresh(bool animate)
+{
+    static const char *const statuses[] = {
+        "Syncing", "Paused", "Failed",
+    };
+    static const char *const titles[] = {
+        "Saving offline", "Sync paused", "Can't sync library",
+    };
+    static const char *const details[] = {
+        "Saving your mix", "Download on hold", "Try again with OK",
+    };
+    static const char *const toasts[] = {
+        "Saving...", "Progress saved", "OK: retry",
+    };
+    static const uint8_t progress[] = { 64, 64, 64 };
+    const ui_glass_theme_t *t = theme();
+    uint8_t state = s_feedback_state % 3u;
+    uint32_t color = state == 0 ? t->accent
+                               : state == 1 ? t->warning : t->danger;
+    if (!s_feedback.status_chip || !s_feedback.status_label ||
+        !s_feedback.alert || !s_feedback.alert_title ||
+        !s_feedback.alert_detail || !s_feedback.progress.indicator ||
+        !s_feedback.progress.value || !s_feedback.toast_label) {
+        return;
+    }
+
+    ui_glass_surface_set_tint(s_feedback.status_chip, color,
+                              accessible_opacity(LV_OPA_30));
+    lv_label_set_text(s_feedback.status_label, statuses[state]);
+    set_label_color(s_feedback.status_label, color);
+    ui_glass_surface_set_tint(s_feedback.alert, color,
+                              accessible_opacity(LV_OPA_20));
+    lv_label_set_text(s_feedback.alert_title, titles[state]);
+    set_label_color(s_feedback.alert_title, color);
+    lv_label_set_text(s_feedback.alert_detail, details[state]);
+    lv_label_set_text_fmt(s_feedback.progress.value, "%u%%",
+                          progress[state]);
+    lv_obj_set_style_bg_color(s_feedback.progress.indicator,
+                              lv_color_hex(color), 0);
+    if (animate) {
+        animate_width(s_feedback.progress.indicator,
+                      168 * progress[state] / 100);
+    } else {
+        lv_obj_set_width(s_feedback.progress.indicator,
+                         168 * progress[state] / 100);
+    }
+    lv_label_set_text(s_feedback.toast_label, toasts[state]);
+    lv_obj_align(s_feedback.toast_label, LV_ALIGN_CENTER, 0, -1);
+}
+
+static void build_feedback(lv_obj_t *root)
+{
+    const ui_glass_theme_t *t = theme();
+    lv_obj_t *stage = showcase_content_stage_create(root, t);
+    feedback_chip(stage, 14, 10, 82, "Demo", t->text_muted, NULL, t);
+    s_feedback.status_chip = feedback_chip(
+        stage, 108, 10, 82, "", t->accent, &s_feedback.status_label, t);
+
+    s_feedback.alert = ui_glass_surface_create(
+        stage, 14, 50, 180, 52, UI_GLASS_RADIUS_PANEL, t->accent,
+        accessible_opacity(LV_OPA_20), t->control_material);
+    ui_glass_surface_set_edge_strength(s_feedback.alert,
+                                       t->focus_edge_strength / 3);
+    s_feedback.alert_title = text_at(
+        s_feedback.alert, "", 14, 8, &lv_font_montserrat_14, t->accent);
+    s_feedback.alert_detail = text_at(
+        s_feedback.alert, "", 14, 29,
+        &lv_font_montserrat_14, t->text_muted);
+
+    s_feedback.progress = showcase_progress_create(
+        stage, 108, "Saved", 64, t);
+    // T3 已定案（候选②，toast 专用配方）：toast 是非交互瞬态反馈，材质与填充
+    // 仍走 platter 的 REGULAR/CONTRAST 配方（control_opacity 154/218/236），
+    // 实测四主题 14px 白字对玻璃底的像素级最低对比度为 9.60 / 13.05 / 13.63 /
+    // 9.60，全部超过 WCAG AAA 7:1，edge 只画在周边三环上、不进字形区，故降边
+    // 对可读性零影响。但 helper 给的 focus 级边（Standard 126：外环 105、内环
+    // 38/10、顶高光 111）让 toast 看起来"可按"；这里降到 CHROME 档案种子 30
+    // （REGULAR 环 25/9/2、高光 27；CONTRAST 主题 21/7/2、22），安静且无
+    // glint，与被动 chrome 语义一致。
+    // 不选候选③（真切 CHROME 材质）：它的 fill_opacity=30 把可读性完全押给深
+    // 壁纸——本页字形带实测 16.5:1 只是因为那一条壁纸恰好近黑，壁纸亮块透过后
+    // 无保证；要稳就得再加一层深色实色衬底，多一个 lv_obj 与一遍约 5.3k px
+    // 混合，换来的对比度（16.7）相对本配方的 9.6 没有实际收益，还彻底压死玻璃
+    // 透传。helper 被 footer / Kaboo 卡共用，不能改，只在此调用点覆盖。
+    lv_obj_t *toast = ui_glass_platter_create(stage, 26, 158, 156, 34, t);
+    // 30 = UI_GLASS_MATERIAL_CHROME 档案的 edge_strength 种子（见
+    // ui_glass_optics_for_material），toast 是全仓唯一借用 chrome 量级边、
+    // 但保留 REGULAR 填充的面。
+    ui_glass_surface_set_edge_strength(toast, 30);
+    s_feedback.toast_label = centered_label(
+        toast, "", &lv_font_montserrat_14, t->text);
+    feedback_refresh(false);
+}
+
+static void build_states(lv_obj_t *root)
+{
+    static const char *const labels[] = {
+        "Standard", "High contrast", "Reduce glass", "Reduce motion",
+    };
+    const ui_glass_theme_t *t = theme();
+    lv_obj_t *stage = showcase_content_stage_create(root, t);
+    lv_obj_t *lens = ui_glass_focus_lens_create(stage, 6, 10, 196, 42, t);
+    // 与 build_lists 同构：行距 48，分割线对称居中，透镜边不再贴着发丝线。
+    content_divider_create(stage, 55, t);
+    content_divider_create(stage, 103, t);
+    content_divider_create(stage, 151, t);
+    for (uint8_t i = 0; i < UI_GLASS_MODE_COUNT; ++i) {
+        s_focus_y[i] = 10 + i * 48;
+        s_focus_h[i] = 42;
+        s_focus_components[i] = ui_glass_row_create(
+            stage, 6, s_focus_y[i], 196, 42, labels[i],
+            i == s_runtime.mode ? "ON" : "", t);
+    }
+    focus_bind(lens, UI_GLASS_MODE_COUNT, (uint8_t)s_runtime.mode);
+}
+
+static void settings_status_refresh(void)
+{
+    if (s_page != PAGE_SETTINGS || !s_settings_note) return;
+    dashboard_preferences_status_t status = dashboard_preferences_status();
+    const char *text = status == DASHBOARD_PREFS_SAVED ? "Saved on device"
+                     : status == DASHBOARD_PREFS_PENDING ? "Saving..."
+                     : "Not saved (session only)";
+    if (strcmp(lv_label_get_text(s_settings_note), text) != 0) {
+        lv_label_set_text(s_settings_note, text);
+        set_label_color(s_settings_note,
+                         status == DASHBOARD_PREFS_ERROR ? theme()->warning
+                                                         : theme()->text_muted);
+    }
+}
+
+// Writes the group that contains s_settings_selection into the four fixed row
+// objects and re-binds the focus lens. Crossing a group boundary used to
+// rebuild the whole page, which also repainted the entire screen; rewriting
+// rows only redraws what changed. Unused rows (the last group has two) and
+// the dividers after the last row are hidden, which matches the old layout.
+static void settings_rows_update(lv_obj_t *lens)
+{
+    const ui_glass_theme_t *t = theme();
+    uint8_t first = ui_dashboard_settings_first(s_settings_selection);
+    uint8_t count = PAGE_SETTINGS - first;
+    if (count > UI_DASHBOARD_SETTINGS_ROWS) count = UI_DASHBOARD_SETTINGS_ROWS;
+    set_label_text_fmt(s_settings_range, "Show pages  %u-%u / %u",
+                       first + 1u, first + count, (unsigned)PAGE_SETTINGS);
+    uint16_t mask = dashboard_preferences_pages();
+    for (uint8_t i = 0; i < UI_DASHBOARD_SETTINGS_ROWS; ++i) {
+        ui_glass_component_t *row = &s_focus_components[i];
+        bool shown = i < count;
+        ui_glass_set_hidden_if_changed(row->root, !shown);
+        if (i + 1u < UI_DASHBOARD_SETTINGS_ROWS) {
+            ui_glass_set_hidden_if_changed(s_settings_dividers[i],
+                                           i + 1u >= count);
+        }
+        if (!shown) continue;
+        showcase_page_t page = UI_DASHBOARD_PAGE_ORDER[first + i];
+        set_label_text(row->label, page == SHOWCASE_NAVIGATION
+                                       ? "Home (always on)"
+                                       : PAGE_TITLES[page]);
+        showcase_choice_set(row, ui_dashboard_page_visible(mask, page), t);
+    }
+    focus_bind(lens, count, s_settings_selection - first);
+}
+
+static void build_settings(lv_obj_t *root)
+{
+    const ui_glass_theme_t *t = theme();
+    lv_obj_t *stage = showcase_content_stage_create(root, t);
+    s_settings_range = text_at(stage, "", 14, 0, &lv_font_montserrat_14,
+                               t->text_muted);
+    lv_obj_t *lens = ui_glass_focus_lens_create(stage, 6, 22, 196, 42, t);
+    for (uint8_t i = 0; i < UI_DASHBOARD_SETTINGS_ROWS; ++i) {
+        // 行距 43（原 42）：原 42 使相邻透镜首尾相接，分割线只能落在上一行
+        // 透镜的底边外环扫描行上（y+41）。多出的 1px 让发丝线独占两条外环
+        // 之间的扫描行（y+42），与上下外环各相距 1px、不再与外环重合。
+        s_focus_y[i] = 22 + i * 43;
+        s_focus_h[i] = 42;
+        s_focus_components[i] = showcase_choice_create(
+            stage, s_focus_y[i], "", false, false, t);
+        if (i + 1u < UI_DASHBOARD_SETTINGS_ROWS) {
+            s_settings_dividers[i] =
+                content_divider_create(stage, s_focus_y[i] + 42, t);
+        }
+    }
+    settings_rows_update(lens);
+    s_settings_note = text_at(root, "", 28, 206,
+                              &lv_font_montserrat_14, t->text_muted);
+    lv_obj_set_size(s_settings_note, 184, lv_font_montserrat_14.line_height);
+    lv_label_set_long_mode(s_settings_note, LV_LABEL_LONG_DOT);
+    settings_status_refresh();
+}
+
+static lv_obj_t *scene_create(void)
+{
+    lv_obj_t *scene = plain_object(s_scene_host, 0, 0,
+                                   LIQUID_GLASS_COMPOSITOR_WIDTH,
+                                   LIQUID_GLASS_COMPOSITOR_HEIGHT);
+    return scene;
+}
+
+// ---- 实时数据页：Kaboo / Claude ----
+//
+// 这两页是实时数据页。与展示场景共用 plain_object/solid_object/text_at
+// 与 theme()，但内容层用自己的 data_stage()：压暗层一路铺到屏幕底部并带向下
+// 淡出的渐变，让导航条坐在同一片材质上而不是压在边缘（真机验证过的效果）。
+
+static lv_obj_t *data_stage(lv_obj_t *root)
+{
+    const ui_glass_theme_t *t = theme();
+    // Keep the standard wallpaper treatment while honoring accessibility modes.
+    lv_opa_t canvas_opacity = content_canvas_opacity();
+    quiet_canvas_create(root, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH,
+                        SHOWCASE_SCENE_HEIGHT, t->content_surface,
+                        canvas_opacity);
+    lv_obj_t *fade = solid_object(root, 0, 196, LIQUID_GLASS_COMPOSITOR_WIDTH,
+                                  SHOWCASE_SCENE_HEIGHT - 196, 0,
+                                  t->content_surface, LV_OPA_TRANSP);
+    lv_obj_set_style_bg_grad_color(fade, lv_color_hex(t->content_surface), 0);
+    lv_obj_set_style_bg_grad_dir(fade, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_bg_main_opa(fade, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_grad_opa(fade, canvas_opacity, 0);
+    lv_obj_set_style_bg_opa(fade, LV_OPA_COVER, 0);
+    return plain_object(root, 16, 4, 208, 204);
+}
+
+// token 计数压缩成 K/M/B，与 kaboo 自己的显示口径一致。
+static void format_tokens(char *buf, size_t cap, uint64_t tokens)
+{
+    if (tokens >= 1000000000ull) {
+        snprintf(buf, cap, "%llu.%lluB", tokens / 1000000000ull,
+                 (tokens % 1000000000ull) / 100000000ull);
+    } else if (tokens >= 1000000ull) {
+        snprintf(buf, cap, "%llu.%lluM", tokens / 1000000ull,
+                 (tokens % 1000000ull) / 100000ull);
+    } else if (tokens >= 1000ull) {
+        snprintf(buf, cap, "%llu.%lluK", tokens / 1000ull,
+                 (tokens % 1000ull) / 100ull);
+    } else {
+        snprintf(buf, cap, "%llu", tokens);
+    }
+}
+
+static void format_cost(char *buf, size_t cap, uint32_t cents)
+{
+    snprintf(buf, cap, "$%" PRIu32 ".%02" PRIu32, cents / 100u, cents % 100u);
+}
+
+// 距重置的剩余时间。窗口已翻篇时调用方不应走到这里。
+static void format_remaining(char *buf, size_t cap, uint32_t seconds)
+{
+    if (seconds >= 3600u) {
+        snprintf(buf, cap, "resets in %" PRIu32 "h %" PRIu32 "m",
+                 seconds / 3600u, (seconds % 3600u) / 60u);
+    } else {
+        snprintf(buf, cap, "resets in %" PRIu32 "m", seconds / 60u);
+    }
+}
+
+// 卡片下方的位置圆点：当前卡实心 accent，其余淡灰。
+static void build_dots(lv_obj_t *parent, int y, lv_obj_t **dots, int count,
+                       const ui_glass_theme_t *t)
+{
+    int span = count * 8 + (count - 1) * 14;
+    int x = (208 - span) / 2;
+    for (int i = 0; i < count; ++i) {
+        dots[i] = solid_object(parent, x + i * 22, y, 8, 8, LV_RADIUS_CIRCLE,
+                               t->text_muted, LV_OPA_40);
+    }
+}
+
+static void dots_select(lv_obj_t **dots, int count, int active,
+                        const ui_glass_theme_t *t)
+{
+    for (int i = 0; i < count; ++i) {
+        if (!dots[i]) continue;
+        bool on = (i == active);
+        ui_glass_set_bg_color_if_changed(dots[i],
+                                         on ? t->accent : t->text_muted);
+        ui_glass_set_bg_opa_if_changed(dots[i], on ? LV_OPA_COVER : LV_OPA_40);
+    }
+}
+
+static void build_kaboo(lv_obj_t *root)
+{
+    const ui_glass_theme_t *t = theme();
+    lv_obj_t *stage = data_stage(root);
+
+    // 一张大玻璃卡承载当前窗口：窗口名 → 大字 token → 费用。
+    lv_obj_t *card = ui_glass_platter_create(stage, 12, 28, 184, 118, t);
+    // This is read-only data, so keep the platter's glass edge below the
+    // interactive focus lens and let the numbers carry the hierarchy.
+    ui_glass_surface_set_edge_strength(card, t->focus_edge_strength / 2);
+    s_kaboo_view.label = text_at(card, "", 0, 14, &lv_font_montserrat_14,
+                                 t->text_muted);
+    lv_obj_set_width(s_kaboo_view.label, 184);
+    lv_obj_set_style_text_align(s_kaboo_view.label, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_kaboo_view.value = text_at(card, "--", 0, 36, &font_digits_44, t->text);
+    lv_obj_set_width(s_kaboo_view.value, 184);
+    lv_obj_set_style_text_align(s_kaboo_view.value, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_kaboo_view.cost = text_at(card, "", 0, 88, &lv_font_montserrat_14,
+                                t->accent);
+    lv_obj_set_width(s_kaboo_view.cost, 184);
+    lv_obj_set_style_text_align(s_kaboo_view.cost, LV_TEXT_ALIGN_CENTER, 0);
+
+    build_dots(stage, 156, s_kaboo_view.dots, KABOO_CARD_COUNT, t);
+
+    // 模型名是数据卡的被动标签，使用低强度玻璃边保持它与主卡材质相连，
+    // 又不会抢过大数字的层级。
+    lv_obj_t *chip = ui_glass_surface_create(
+        stage, 12, 172, 184, 28, LV_RADIUS_CIRCLE, t->accent,
+        accessible_opacity(LV_OPA_20), t->control_material);
+    ui_glass_surface_set_edge_strength(chip, t->focus_edge_strength / 3);
+    s_kaboo_view.model = text_at(chip, "--", 10, 6, &lv_font_montserrat_14,
+                                 t->accent);
+    lv_obj_set_width(s_kaboo_view.model, 164);
+    lv_label_set_long_mode(s_kaboo_view.model, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(s_kaboo_view.model, lv_font_montserrat_14.line_height);
+    lv_obj_set_style_text_align(s_kaboo_view.model, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_kaboo_view.note = text_at(stage, "", 12, 4, &lv_font_montserrat_14,
+                                t->warning);
+    lv_obj_set_width(s_kaboo_view.note, 184);
+    lv_obj_set_style_text_align(s_kaboo_view.note, LV_TEXT_ALIGN_CENTER, 0);
+}
+
+// 一个配额窗口 = 标题 + 百分比 + 进度条 + 重置提示，铺进共享玻璃卡里
+// y 起的 82px 区块（见 build_claude）。track 用 text_muted @ OPA_30 —— 与
+// 玻璃 slider 的 track 同一配方：旧黑卡上的 text @ OPA_10 压在深色实色面上，
+// 换成会透出壁纸的玻璃面后会糊掉，text_muted/30 在四套主题的玻璃面上都可辨。
+static void build_quota_row(lv_obj_t *card, int y, const char *label,
+                            lv_obj_t **out_value, lv_obj_t **out_bar,
+                            lv_obj_t **out_reset)
+{
+    const ui_glass_theme_t *t = theme();
+
+    text_at(card, label, 14, y + 10, &lv_font_montserrat_14, t->text);
+    *out_value = text_at(card, "--", 100, y + 6, &lv_font_montserrat_20,
+                         t->text);
+    lv_obj_set_width(*out_value, 70);
+    lv_obj_set_style_text_align(*out_value, LV_TEXT_ALIGN_RIGHT, 0);
+
+    lv_obj_t *track = solid_object(card, 14, y + 40, 156, 8,
+                                   LV_RADIUS_CIRCLE, t->text_muted, LV_OPA_30);
+    *out_bar = solid_object(track, 0, 0, 0, 8, LV_RADIUS_CIRCLE,
+                            t->accent, LV_OPA_COVER);
+
+    *out_reset = text_at(card, "", 14, y + 56, &lv_font_montserrat_14,
+                         t->text_muted);
+    lv_obj_set_width(*out_reset, 156);
+}
+
+// Claude 页两个窗口同屏，不轮换 —— 配额只有两项，一眼看全更实用。
+// 与 Kaboo 同构：一张大玻璃卡承载两个窗口，中间一条 hairline。不叠两张玻璃
+// 卡 —— 相隔 10px 的两张卡各自的三层光学边会在沟槽里对置成两组强边；合并后
+// 本页稳态玻璃面只有这一张（外加全局 footer），与 Kaboo 完全一致。
+static void build_claude(lv_obj_t *root)
+{
+    const ui_glass_theme_t *t = theme();
+    lv_obj_t *stage = data_stage(root);
+
+    // 卡 y27..197：区块 1 占卡内 0..81，hairline 在 87，区块 2 从 88 起，
+    // 底边留 6px，与单窗口原卡的内部留白一致。
+    lv_obj_t *card = ui_glass_platter_create(stage, 12, 27, 184, 170, t);
+    // Both quota rows are read-only. A quieter rim preserves the shared glass
+    // surface while keeping it visually below the page focus treatment.
+    ui_glass_surface_set_edge_strength(card, t->focus_edge_strength / 2);
+
+    build_quota_row(card, 0, "5h Used",
+                    &s_claude_view.five_value, &s_claude_view.five_bar,
+                    &s_claude_view.five_reset);
+
+    solid_object(card, 14, 87, 156, 1, 0, t->text_muted, LV_OPA_20);
+
+    build_quota_row(card, 88, "7d Used",
+                    &s_claude_view.seven_value, &s_claude_view.seven_bar,
+                    &s_claude_view.seven_reset);
+
+    s_claude_view.note = text_at(stage, "", 12, 4, &lv_font_montserrat_14,
+                                 t->warning);
+    lv_obj_set_width(s_claude_view.note, 184);
+    lv_obj_set_style_text_align(s_claude_view.note, LV_TEXT_ALIGN_CENTER, 0);
+}
+
+// Source age is independent of BLE receipt time: repeated packets can carry
+// an old sample. Keep this line visible even while the source is fresh.
+static bool refresh_source_note(lv_obj_t *note, uint32_t sampled_unix,
+                                 uint32_t now_unix, bool have_now)
+{
+    const ui_glass_theme_t *t = theme();
+    bool fresh = have_now && usage_model_source_fresh(
+        sampled_unix, now_unix, SOURCE_TTL_SECONDS);
+    set_label_color(note, fresh ? t->text_muted : t->warning);
+    if (!have_now) {
+        set_label_text(note, "Update time unknown");
+    } else if (!fresh) {
+        set_label_text(note, "Data may be stale");
+    } else {
+        uint32_t minutes = (now_unix - sampled_unix) / 60u;
+        if (minutes == 0) set_label_text(note, "Updated <1m ago");
+        else set_label_text_fmt(note, "Updated %" PRIu32 "m ago", minutes);
+    }
+    return fresh;
+}
+
+static void refresh_kaboo(const usage_snapshot_t *snap, bool have)
+{
+    static const char *const LABELS[KABOO_CARD_COUNT] = {
+        "TODAY / tokens", "7 DAYS / tokens", "30 DAYS / tokens",
+    };
+    const ui_glass_theme_t *t = theme();
+    if (!s_kaboo_view.value) return;
+
+    set_label_text(s_kaboo_view.label, LABELS[s_kaboo_card]);
+    dots_select(s_kaboo_view.dots, KABOO_CARD_COUNT, s_kaboo_card, t);
+
+    if (!have || !(snap->flags & USAGE_FLAG_KABOO_VALID)) {
+        set_label_color(s_kaboo_view.note, t->warning);
+        set_label_text(s_kaboo_view.value, "--");
+        set_label_text(s_kaboo_view.cost, "");
+        set_label_text(s_kaboo_view.model, "--");
+        set_label_text(s_kaboo_view.note,
+                       have ? "No kaboo data" : "Waiting for Mac");
+        return;
+    }
+
+    uint64_t tokens = snap->today_tokens;
+    uint32_t cents = snap->today_cost_cents;
+    if (s_kaboo_card == 1) {
+        tokens = snap->week_tokens;
+        cents = snap->week_cost_cents;
+    } else if (s_kaboo_card == 2) {
+        tokens = snap->month_tokens;
+        cents = snap->month_cost_cents;
+    }
+
+    char buf[32];
+    format_tokens(buf, sizeof buf, tokens);
+    set_label_text(s_kaboo_view.value, buf);
+    format_cost(buf, sizeof buf, cents);
+    set_label_text(s_kaboo_view.cost, buf);
+    set_label_text(s_kaboo_view.model,
+                   snap->top_model[0] ? snap->top_model : "--");
+
+    // 数据源过期时明确标注，而不是让旧数字冒充当前值。
+    uint32_t now_unix = 0;
+    bool have_now = usage_model_now_unix(snap, have, esp_timer_get_time(),
+                                         &now_unix);
+    bool fresh = refresh_source_note(s_kaboo_view.note,
+                                     snap->kaboo_sampled_unix, now_unix, have_now);
+    set_label_color(s_kaboo_view.value, fresh ? t->text : t->text_muted);
+    set_label_color(s_kaboo_view.cost, fresh ? t->accent : t->text_muted);
+}
+
+static void refresh_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset,
+                              uint8_t pct, uint32_t resets_unix,
+                              uint32_t now_unix, bool have_now, bool source_fresh)
+{
+    const ui_glass_theme_t *t = theme();
+
+    set_label_text_fmt(value, "%u%%", pct);
+    // 轨道宽 156，与 build_quota_row 一致
+    ui_glass_set_width_if_changed(bar, 156 * pct / 100);
+
+    // 用量越高越接近告警色，让人一眼看出余量紧张。100% 爆额是本页最需要
+    // 警示的状态，绝不能被"数据过期"洗成浅色 —— 那会让一根满额红条渲染成
+    // 几乎不可见的白条，还与"空条/无数据"混淆。过期改用降低不透明度表达：
+    // 语义色（青/黄/红）始终保留，只是变淡，配合顶部 note 已经说明的 stale。
+    uint32_t color = t->accent;
+    if (pct >= 90) color = t->danger;
+    else if (pct >= 70) color = t->warning;
+    bool expired = have_now && usage_model_quota_expired(resets_unix, now_unix);
+    bool current = source_fresh && !expired;
+    set_label_color(value, current ? t->text : t->text_muted);
+    ui_glass_set_bg_color_if_changed(bar, color);
+    // 新鲜=实色；过期=半透明但仍是语义色，一眼分得清"满额但旧"与"当前满额"。
+    ui_glass_set_bg_opa_if_changed(bar, current ? LV_OPA_COVER : LV_OPA_50);
+
+    if (!have_now) {
+        set_label_text(reset, "");
+        return;
+    }
+    if (expired) {
+        set_label_text(reset, "Awaiting update");
+        return;
+    }
+    char buf[40];
+    format_remaining(buf, sizeof buf,
+                     usage_model_seconds_until(resets_unix, now_unix));
+    set_label_text(reset, buf);
+}
+
+// 单个配额窗口无数据时的呈现：空轨道 + "--"，不是 0%。0% 是一个具体断言，
+// 而"这个窗口当前没有数据"是另一回事。
+static void blank_quota_row(lv_obj_t *value, lv_obj_t *bar, lv_obj_t *reset)
+{
+    set_label_color(value, theme()->text_muted);
+    set_label_text(value, "--");
+    ui_glass_set_width_if_changed(bar, 0);
+    // 复位不透明度：同一 bar 可能上一轮是过期态（LV_OPA_50），空态宽度虽为 0，
+    // 但避免残留状态污染下一次 refresh_quota_row 之前的任何中间绘制。
+    ui_glass_set_bg_opa_if_changed(bar, LV_OPA_COVER);
+    set_label_text(reset, "not active");
+}
+
+static void refresh_claude(const usage_snapshot_t *snap, bool have)
+{
+    if (!s_claude_view.five_value) return;
+
+    if (!have || !(snap->flags & USAGE_FLAG_CLAUDE_VALID)) {
+        set_label_color(s_claude_view.note, theme()->warning);
+        blank_quota_row(s_claude_view.five_value, s_claude_view.five_bar,
+                        s_claude_view.five_reset);
+        blank_quota_row(s_claude_view.seven_value, s_claude_view.seven_bar,
+                        s_claude_view.seven_reset);
+        set_label_text(s_claude_view.five_reset, "");
+        set_label_text(s_claude_view.seven_reset, "");
+        set_label_text(s_claude_view.note,
+                       have ? "No quota data" : "Waiting for Mac");
+        return;
+    }
+
+    uint32_t now_unix = 0;
+    bool have_now = usage_model_now_unix(snap, have, esp_timer_get_time(),
+                                         &now_unix);
+    bool fresh = refresh_source_note(s_claude_view.note,
+                                     snap->claude_sampled_unix, now_unix, have_now);
+    // 两个窗口各自判断：Claude Code 只在窗口活跃时才报它，缺失的那个显示
+    // "not active" 而不是伪造 0%。
+    if (snap->flags & USAGE_FLAG_FIVE_HOUR) {
+        refresh_quota_row(s_claude_view.five_value, s_claude_view.five_bar,
+                          s_claude_view.five_reset, snap->five_hour_pct,
+                          snap->five_hour_resets_unix, now_unix, have_now, fresh);
+    } else {
+        blank_quota_row(s_claude_view.five_value, s_claude_view.five_bar,
+                        s_claude_view.five_reset);
+    }
+    if (snap->flags & USAGE_FLAG_SEVEN_DAY) {
+        refresh_quota_row(s_claude_view.seven_value, s_claude_view.seven_bar,
+                          s_claude_view.seven_reset, snap->seven_day_pct,
+                          snap->seven_day_resets_unix, now_unix, have_now, fresh);
+    } else {
+        blank_quota_row(s_claude_view.seven_value, s_claude_view.seven_bar,
+                        s_claude_view.seven_reset);
+    }
+
+}
+
+// 从 BLE 快照刷新当前数据页。展示场景不取快照——零 BLE 开销，且它们的
+// view 指针在 stop_scene_activity 后为 NULL。
+// 上一次真正重绘时的输入指纹。数据页每 200ms 被 tick 一次，但渲染出的文字
+// 只在三种情况下变化：来了新 BLE 包、Kaboo 翻了卡、或者 Claude 倒计时跨过了
+// 一分钟。其余 tick 全部跳过 —— 否则 21 个 label 每秒被重写 5 次，在没有
+// PSRAM 的堆上是 100+ 次/秒的 malloc/free 空转。
+static struct {
+    uint32_t generation;
+    uint8_t  card;
+    uint32_t minute;
+    bool     valid;
+} s_data_drawn;
+
+static void refresh_data_page(void)
+{
+    if (!is_data_page(s_page)) return;
+    usage_snapshot_t snap;
+    uint32_t generation = 0;
+    bool have = usage_link_get(&snap, &generation);
+
+    uint32_t now_unix = 0;
+    uint32_t minute = 0;
+    if (have && usage_model_now_unix(&snap, have, esp_timer_get_time(), &now_unix)) {
+        minute = now_unix / 60u;
+    }
+    if (s_data_drawn.valid && s_data_drawn.generation == generation &&
+        s_data_drawn.card == s_kaboo_card && s_data_drawn.minute == minute) {
+        return;
+    }
+    s_data_drawn = (typeof(s_data_drawn)){
+        .generation = generation, .card = s_kaboo_card,
+        .minute = minute, .valid = true,
+    };
+
+    if (s_page == PAGE_KABOO) refresh_kaboo(&snap, have);
+    else refresh_claude(&snap, have);
+}
+
+static const char *footer_page_title(showcase_page_t page)
+{
+    // The two footer slots are intentionally narrow so they remain readable
+    // beside the directional glyphs. Appearance is the only page name that
+    // exceeds that slot at the footer font size.
+    return page == SHOWCASE_STATES ? "Appear." : PAGE_TITLES[page];
+}
+
+static void kaboo_card_advance(void)
+{
+    s_kaboo_card = ui_dashboard_card_next(s_kaboo_card, KABOO_CARD_COUNT, 1);
+    s_card_elapsed_ms = 0;
+    refresh_data_page();
+}
+
+static void scene_build(showcase_page_t page, lv_obj_t *root)
+{
+    lv_obj_t *content = plain_object(
+        root, 0, SHOWCASE_SCENE_Y,
+        LIQUID_GLASS_COMPOSITOR_WIDTH, SHOWCASE_SCENE_HEIGHT);
+    switch (page) {
+    case SHOWCASE_BUTTONS:       build_buttons(content); break;
+    case SHOWCASE_SELECTION:     build_selection(content); break;
+    case SHOWCASE_ADJUSTMENTS:   build_adjustments(content); break;
+    case SHOWCASE_LISTS:         build_lists(content); break;
+    case SHOWCASE_OVERLAYS:      build_overlays(content); break;
+    case SHOWCASE_NAVIGATION:    build_navigation(content); break;
+    case SHOWCASE_FEEDBACK:      build_feedback(content); break;
+    case SHOWCASE_STATES:        build_states(content); break;
+    case PAGE_KABOO:             build_kaboo(content); break;
+    case PAGE_CLAUDE:            build_claude(content); break;
+    case PAGE_SETTINGS:          build_settings(content); break;
+    default:                     build_buttons(content); break;
+    }
+    // 数据页建好后立刻用最后一份快照填充，不等下一个 tick 留出空白帧。
+    // 刚建的 label 是空的，必须作废上一次的指纹，否则同一份快照会被跳过。
+    s_data_drawn.valid = false;
+    refresh_data_page();
+}
+
+static void shell_refresh(void)
+{
+    // Called on page changes, mode toggles, hint expiry and Settings edits.
+    // Every write below compares first: the header and footer are persistent,
+    // so only the text that actually changed is redrawn.
+    const ui_glass_theme_t *t = theme();
+    uint16_t mask = dashboard_preferences_pages();
+    // Keep the entire title slot for the page name; mode lives in the footer.
+    set_label_text(s_header_title, PAGE_TITLES[s_page]);
+    set_label_color(s_header_title, s_scene_mode ? t->accent : t->text);
+    showcase_page_t left = ui_dashboard_page_next(mask, s_page, -1);
+    showcase_page_t right = ui_dashboard_page_next(mask, s_page, 1);
+    if (s_mode_hint_ms && page_has_scene_interaction(s_page)) {
+        set_label_text(s_footer_label,
+                       s_scene_mode ? "Hold OK: exit controls"
+                                    : "Hold OK: enter controls");
+    } else if (s_scene_mode) {
+        if (s_page == SHOWCASE_ADJUSTMENTS) {
+            set_label_text(s_footer_label,
+                           LV_SYMBOL_UP LV_SYMBOL_DOWN " adjust   OK next");
+        } else if (s_page == PAGE_SETTINGS) {
+            set_label_text(s_footer_label,
+                           LV_SYMBOL_UP LV_SYMBOL_DOWN " move   OK show/hide");
+        } else if (s_page == PAGE_KABOO) {
+            set_label_text(s_footer_label,
+                           LV_SYMBOL_UP LV_SYMBOL_DOWN " cards   OK next");
+        } else {
+            set_label_text(s_footer_label,
+                           LV_SYMBOL_UP LV_SYMBOL_DOWN "  move    OK  use");
+        }
+    } else if (left == s_page && right == s_page) {
+        set_label_text(s_footer_label, "OK: choose pages");
+    } else {
+        set_label_text_fmt(s_footer_left, LV_SYMBOL_LEFT " %s",
+                           footer_page_title(left));
+        set_label_text_fmt(s_footer_right, "%s " LV_SYMBOL_RIGHT,
+                           footer_page_title(right));
+    }
+    bool show_hint = s_scene_mode || (left == s_page && right == s_page) ||
+                     (s_mode_hint_ms && page_has_scene_interaction(s_page));
+    ui_glass_set_hidden_if_changed(s_footer_label, !show_hint);
+    ui_glass_set_hidden_if_changed(s_footer_left, show_hint);
+    ui_glass_set_hidden_if_changed(s_footer_right, show_hint);
+    set_label_color(s_footer_left, t->text_muted);
+    set_label_color(s_footer_right, t->text_muted);
+    set_label_color(s_footer_label, t->text_muted);
+    ui_glass_surface_set_tint(s_footer, t->control_tint,
+                              t->control_opacity);
+    ui_glass_surface_set_material(s_footer, t->control_material);
+    ui_glass_surface_set_edge_strength(s_footer, t->focus_edge_strength);
+    // 导航条在每一页都可见：它现在承担导航信息，不再只是动作提示。
+    ui_glass_set_hidden_if_changed(s_footer, false);
+    link_dot_refresh();
+    // No z-order work here: scenes live inside s_scene_host, which is below
+    // the header and footer, so the chrome always stays on top. Reordering
+    // (lv_obj_move_foreground) would invalidate the whole screen each time.
+    // Text changes invalidate intrinsic label sizes. Resolve aligned chrome in
+    // the same frame so the first post-transition render cannot use the old
+    // footer width or temporarily omit the updated battery glyphs.
+    lv_obj_update_layout(s_runtime.screen);
+}
+
+static void page_transition_set(void *value, int32_t progress)
+{
+    page_transition_t *transition = value;
+    if (!transition || !transition->incoming || !transition->outgoing) return;
+    int32_t eased = ui_glass_ease_in_out_cubic(progress);
+    int32_t travel = ui_glass_interpolate(
+        0, LIQUID_GLASS_COMPOSITOR_WIDTH, eased);
+    lv_obj_set_x(transition->outgoing, -transition->direction * travel);
+    lv_obj_set_x(transition->incoming,
+                 transition->direction *
+                 (LIQUID_GLASS_COMPOSITOR_WIDTH - travel));
+}
+
+// 步进表跑到尽头时调用；语义与原来删掉一次性 timer 相同。
+static void scene_timer_finish(void)
+{
+    s_scene_done = true;
+}
+
+static void scene_showcase_step(void)
+{
+    s_scene_step++;
+    switch (s_page) {
+    case SHOWCASE_BUTTONS:
+        if (s_scene_step == 1) focused_action();
+        else if (s_scene_step == 2 || s_scene_step == 4) focus_move(1);
+        else if (s_scene_step == 3 || s_scene_step == 5) focused_action();
+        else scene_timer_finish();
+        break;
+    case SHOWCASE_SELECTION:
+        if (s_scene_step == 1) focused_action();
+        else if (s_scene_step == 2 || s_scene_step == 4) focus_move(1);
+        else if (s_scene_step == 3) focused_action();
+        else if (s_scene_step == 5) press_focused_component();
+        else scene_timer_finish();
+        break;
+    case SHOWCASE_ADJUSTMENTS:
+        if (s_scene_step == 1) focused_action();
+        else if (s_scene_step == 2 || s_scene_step == 4) focus_move(1);
+        else if (s_scene_step == 3 || s_scene_step == 5) focused_action();
+        else scene_timer_finish();
+        break;
+    case SHOWCASE_LISTS:
+        if (s_scene_step == 1 || s_scene_step == 2 || s_scene_step == 4) {
+            focus_move(1);
+        } else if (s_scene_step == 3 || s_scene_step == 5) {
+            focused_action();
+        } else {
+            scene_timer_finish();
+        }
+        break;
+    case SHOWCASE_OVERLAYS:
+        if (s_scene_step == 1 || s_scene_step == 4) {
+            morph_toggle();
+        } else if (s_scene_step == 2 || s_scene_step == 3) {
+            s_morph.item = (s_morph.item + 1u) % 3u;
+            morph_menu_refresh(true);
+        } else if (s_scene_step == 5) {
+            focused_action();
+        } else {
+            scene_timer_finish();
+        }
+        break;
+    case SHOWCASE_FEEDBACK:
+        if (s_scene_step <= 3) focused_action();
+        else scene_timer_finish();
+        break;
+    case SHOWCASE_STATES:
+        // 无人巡航只演示焦点移动，不真的应用无障碍模式。模式存在共享
+        // runtime 里，应用后会重新主题化全部十一个页面；在无限循环的巡航里那意味着
+        // Kaboo / Claude 每 70 秒换一次配色。用户按 OK 时才切换。
+        if (s_scene_step <= 2) focus_move(1);
+        else scene_timer_finish();
+        break;
+    default:
+        scene_timer_finish();
+        break;
+    }
+}
+
+// 重置当前场景的步进演示。数据页没有步进表，直接标记完成。
+static void start_scene_showcase(void)
+{
+    s_scene_step = 0;
+    s_step_elapsed_ms = 0;
+    // 数据页没有步进表；关闭步进演示时所有页都直接标记完成。
+    s_scene_done = !SHOWCASE_STEPS_ENABLED || is_data_page(s_page) || s_page == PAGE_SETTINGS;
+}
+
+static void page_transition_completed(lv_anim_t *animation)
+{
+    page_transition_t *transition = lv_anim_get_user_data(animation);
+    if (!transition) return;
+    if (transition->outgoing) lv_obj_delete(transition->outgoing);
+    if (transition->incoming) {
+        lv_obj_set_x(transition->incoming, 0);
+        lv_obj_set_style_opa(transition->incoming, LV_OPA_COVER, 0);
+    }
+    transition->outgoing = NULL;
+    transition->incoming = NULL;
+    s_transitioning = false;
+    ui_glass_set_optics_suppressed(false);
+    ui_glass_runtime_set_quality(&s_runtime, s_saved_quality, false);
+    shell_refresh();
+    lv_obj_invalidate(s_runtime.screen);
+    start_scene_showcase();
+}
+
+static void show_page(showcase_page_t page, int8_t direction, bool animate)
+{
+    if (page >= SHOWCASE_PAGE_COUNT || s_transitioning) return;
+    stop_scene_activity();
+    lv_obj_t *old = s_scene;
+    lv_obj_t *incoming = scene_create();
+    s_page = page;
+    s_mode_hint_ms = 3000;
+    s_scene = incoming;
+    scene_build(page, incoming);
+
+    // The incoming scene is a child of s_scene_host, which sits below the
+    // header and footer, so the chrome stays on top for every intermediate
+    // frame without reordering (and repainting) the screen.
+
+    uint16_t duration = ui_glass_motion_duration(
+        s_runtime.mode, UI_GLASS_MOTION_PAGE);
+    if (!animate || !old || duration == 0) {
+        if (old) lv_obj_delete(old);
+        lv_obj_set_x(incoming, 0);
+        lv_obj_set_style_opa(incoming, LV_OPA_COVER, 0);
+        shell_refresh();
+        // Reduced Motion makes page changes immediate, but state-only scene
+        // demonstrations (toggle, feedback, playback) must keep running.
+        if (animate && old) start_scene_showcase();
+        return;
+    }
+
+    s_transitioning = true;
+    s_saved_quality = s_runtime.quality.level;
+    ui_glass_set_optics_suppressed(true);
+    ui_glass_runtime_set_quality(&s_runtime, UI_GLASS_QUALITY_ECONOMY, true);
+    s_page_motion = (page_transition_t) {
+        .outgoing = old,
+        .incoming = incoming,
+        .direction = direction < 0 ? -1 : 1,
+    };
+    page_transition_set(&s_page_motion, 0);
+    lv_anim_t animation;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, &s_page_motion);
+    lv_anim_set_user_data(&animation, &s_page_motion);
+    lv_anim_set_exec_cb(&animation, page_transition_set);
+    lv_anim_set_values(&animation, 0, UI_GLASS_MOTION_PROGRESS_MAX);
+    lv_anim_set_duration(&animation, duration);
+    lv_anim_set_completed_cb(&animation, page_transition_completed);
+    lv_anim_start(&animation);
+}
+
+static void navigate_showcase_page(int8_t direction)
+{
+    showcase_page_t next = ui_dashboard_page_next(
+        dashboard_preferences_pages(), s_page, direction);
+    if (next != s_page) show_page(next, direction, true);
+}
+
+static void rebuild_page(void)
+{
+    show_page(s_page, 1, false);
+}
+
+// BLE 链路指示点。独立成函数是因为它必须每个 tick 都刷：只在翻页时刷的话，
+// 用户停在一页上时 Mac 连上/断开都不会反映出来。
+static void link_dot_refresh(void)
+{
+    if (!s_link_dot) return;
+    const ui_glass_theme_t *t = theme();
+    // Runs on every 200 ms tick. Only a real connect/disconnect (or theme
+    // change) may redraw the dot; an unconditional write refreshed the display
+    // five times a second on every idle page.
+    ui_glass_set_bg_color_if_changed(
+        s_link_dot, usage_link_connected() ? t->positive : t->text_muted);
+}
+
+// Feeds each new one-second display sample to the adaptive quality
+// controller. Samples that arrive while a page transition locks the tier are
+// dropped; the controller's hysteresis absorbs the rest of a transition.
+static void quality_observe_display(void)
+{
+    bsp_display_perf_snapshot_t perf;
+    if (!bsp_display_perf_get(&perf) ||
+        perf.sample_sequence == s_perf_sequence) {
+        return;
+    }
+    s_perf_sequence = perf.sample_sequence;
+    uint16_t submit_ms_x10 = perf.submit_avg_ms_x10 > UINT16_MAX
+                                 ? UINT16_MAX
+                                 : (uint16_t)perf.submit_avg_ms_x10;
+    ui_glass_runtime_observe(&s_runtime, submit_ms_x10,
+                             perf.pixels_per_update);
+}
+
+// 单一主定时器：巡航、场景步进、Kaboo 轮换、BLE 刷新全在这里按各自计数器推进。
+static void master_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    quality_observe_display();
+    // 链路点在转场期间也要刷，它不属于任何 scene。
+    link_dot_refresh();
+    int battery = atomic_load(&s_battery_soc);
+    if (s_battery_label && battery != s_battery_drawn) {
+        s_battery_drawn = battery;
+        if (battery < 0) lv_label_set_text(s_battery_label, "--%");
+        else lv_label_set_text_fmt(s_battery_label, "%d%%", battery);
+    }
+    navigation_battery_refresh();
+    navigation_clock_refresh();
+    if (s_transitioning) return;
+    adjustments_audio_refresh();
+    settings_status_refresh();
+    if (s_mode_hint_ms) {
+        s_mode_hint_ms = s_mode_hint_ms > SHOWCASE_TICK_MS
+                       ? s_mode_hint_ms - SHOWCASE_TICK_MS : 0;
+        if (!s_mode_hint_ms) shell_refresh();
+    }
+
+    if (is_data_page(s_page)) {
+        // 数据页：Kaboo 自动翻卡 + 从 BLE 快照刷新。手动翻卡后先暂停一会。
+        if (s_page == PAGE_KABOO && ui_dashboard_card_tick(
+                SHOWCASE_TICK_MS, s_scene_mode, CARD_ROTATE_MS,
+                &s_card_elapsed_ms, &s_card_hold_ms)) {
+            kaboo_card_advance();
+        }
+        refresh_data_page();
+        // 无人巡航只在展示场景之间走：自动翻走一个实时看板毫无意义。
+        return;
+    }
+
+    // 展示场景：1 秒一步的页内演示，跑完即止。
+    if (!s_scene_done) {
+        s_step_elapsed_ms += SHOWCASE_TICK_MS;
+        if (s_step_elapsed_ms >= SHOWCASE_SCENE_STEP_MS) {
+            s_step_elapsed_ms = 0;
+            scene_showcase_step();
+        }
+    }
+    // 7 秒无人巡航，任何按键后永久停止。到 Appearance 后折返 Player，
+    // 不进入数据页。
+    if (!s_tour_killed) {
+        s_tour_elapsed_ms += SHOWCASE_TICK_MS;
+        if (s_tour_elapsed_ms >= SHOWCASE_TOUR_PERIOD_MS) {
+            s_tour_elapsed_ms = 0;
+            showcase_page_t next = s_page;
+            for (unsigned i = 0; i < SHOWCASE_PAGE_COUNT; ++i) {
+                next = ui_dashboard_page_next(dashboard_preferences_pages(), next, 1);
+                if (!is_data_page(next) && next != PAGE_SETTINGS) break;
+            }
+            if (next != s_page && !is_data_page(next) && next != PAGE_SETTINGS) {
+                show_page(next, 1, true);
+            }
+        }
+    }
+}
+
+static void focused_action(void)
+{
+    switch (s_page) {
+    case PAGE_SETTINGS: {
+        if (!s_scene_mode) {
+            s_scene_mode = true;
+            s_mode_hint_ms = 3000;
+            shell_refresh();
+            break;
+        }
+        showcase_page_t page = UI_DASHBOARD_PAGE_ORDER[s_settings_selection];
+        if (page == SHOWCASE_NAVIGATION) {
+            lv_label_set_text(s_settings_note, "Home is always on");
+            set_label_color(s_settings_note, theme()->text_muted);
+            break;
+        }
+        uint16_t mask = ui_dashboard_page_toggle(dashboard_preferences_pages(), page);
+        dashboard_preferences_set_pages(mask);
+        showcase_choice_set(&s_focus_components[s_focus.index],
+                             ui_dashboard_page_visible(mask, page), theme());
+        settings_status_refresh();
+        shell_refresh();
+        break;
+    }
+    case SHOWCASE_BUTTONS: {
+        static const char *const results[] = {
+            "Demo | Open selected", "Demo | Share selected", "Demo | Remove selected",
+        };
+        press_focused_component();
+        if (s_moments_result_label && s_focus.index < 3) {
+            lv_label_set_text(s_moments_result_label, results[s_focus.index]);
+        }
+        break;
+    }
+    case SHOWCASE_SELECTION:
+        if (s_focus.index == 0) {
+            segment_select((uint8_t)((s_segment_index + 1u) % 3u), true);
+        } else if (s_focus.index == 1) {
+            s_control_toggle = !s_control_toggle;
+            ui_glass_toggle_set_animated(
+                &s_focus_components[1], s_control_toggle, theme(),
+                ui_glass_motion_duration(s_runtime.mode,
+                                         UI_GLASS_MOTION_FOCUS));
+            thumb_cancel_glint_if_disabled(&s_focus_components[1]);
+        } else if (s_focus.index == 2) {
+            s_selection_check = !s_selection_check;
+            showcase_choice_set(&s_focus_components[2], s_selection_check,
+                                theme());
+            if (s_selection_canvas) {
+                quiet_canvas_set(
+                    s_selection_canvas, theme()->content_surface,
+                    accessible_opacity(s_selection_check ? 160 : 64));
+            }
+        } else {
+            s_selection_radio = !s_selection_radio;
+            showcase_choice_set(&s_focus_components[3], s_selection_radio,
+                                theme());
+        }
+        break;
+    case SHOWCASE_ADJUSTMENTS:
+        focus_move(1);
+        break;
+    case SHOWCASE_LISTS:
+        press_focused_component();
+        if (s_devices_result_label && s_focus.index < s_focus_count) {
+            lv_label_set_text_fmt(s_devices_result_label,
+                                  "Demo | Device %u selected", s_focus.index + 1u);
+        }
+        break;
+    case SHOWCASE_OVERLAYS:
+        if (s_morph.open) {
+            static const char *const results[] = {
+                "Demo | Connect selected", "Demo | Sound selected", "Demo | Sleep selected",
+            };
+            if (s_player_demo_label && s_morph.item < 3) {
+                lv_label_set_text(s_player_demo_label, results[s_morph.item]);
+            }
+            morph_toggle();
+        } else {
+            s_player_playing = !s_player_playing;
+            if (s_player_state_label) {
+                lv_label_set_text(
+                    s_player_state_label,
+                    s_player_playing ? "Playing  |  24 min"
+                                     : "Paused  |  24 min");
+            }
+        }
+        break;
+    case SHOWCASE_FEEDBACK:
+        s_feedback_state = (s_feedback_state + 1u) % 3u;
+        feedback_refresh(true);
+        break;
+    case SHOWCASE_STATES:
+        ui_glass_runtime_set_mode(
+            &s_runtime, (ui_glass_mode_t)s_focus.index);
+        rebuild_page();
+        break;
+    default:
+        break;
+    }
+}
+
+void dashboard_set_battery(int soc)
+{
+    atomic_store(&s_battery_soc, soc >= 0 && soc <= 100 ? soc : -1);
+}
+
+void dashboard_enter(void)
+{
+    s_page = ui_dashboard_page_first(dashboard_preferences_pages());
+    s_settings_selection = 0;
+    s_mode_hint_ms = 3000;
+    s_battery_drawn = -2;
+    s_transitioning = false;
+    ui_glass_set_optics_suppressed(false);
+    s_tour_killed = !SHOWCASE_TOUR_ENABLED;
+    s_scene_mode = false;   // 开机总是浏览模式，避免继承上次的模式状态
+    s_tour_elapsed_ms = 0;
+    s_kaboo_card = 0;
+    s_card_elapsed_ms = 0;
+    s_card_hold_ms = 0;
+    if (!ui_glass_runtime_init(&s_runtime, UI_GLASS_MODE_STANDARD,
+                               UI_GLASS_QUALITY_FULL)) {
+        return;
+    }
+    // Only samples rendered by the dashboard itself count toward quality.
+    bsp_display_perf_snapshot_t perf;
+    s_perf_sequence = bsp_display_perf_get(&perf) ? perf.sample_sequence : 0;
+    const ui_glass_theme_t *t = theme();
+    // Created before the chrome so every scene placed in it stays below the
+    // header and footer without ever reordering the screen's children.
+    s_scene_host = plain_object(
+        s_runtime.screen, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH,
+        LIQUID_GLASS_COMPOSITOR_HEIGHT);
+    s_header_chrome = plain_object(
+        s_runtime.screen, 0, 0, LIQUID_GLASS_COMPOSITOR_WIDTH,
+        SHOWCASE_SCENE_Y);
+    s_header_title = text_at(s_header_chrome, PAGE_TITLES[s_page],
+                             16, 12, &lv_font_montserrat_20, t->text);
+    // 右上角：电量百分比 + BLE 链路指示点。固定几何，避免自动布局在页面
+    // 切换瞬间因文字宽度变化而抖动。-1 时显示 "--%" 而不是画一个数字。
+    s_battery_label = text_at(s_header_chrome, "--%", 168, 13,
+                              &lv_font_montserrat_14, t->text);
+    lv_obj_set_size(s_battery_label, 36, 20);
+    lv_obj_set_style_text_align(s_battery_label, LV_TEXT_ALIGN_RIGHT, 0);
+    int battery = atomic_load(&s_battery_soc);
+    if (battery >= 0) {
+        lv_label_set_text_fmt(s_battery_label, "%d%%", battery);
+    }
+    s_battery_drawn = battery;
+    s_link_dot = solid_object(s_header_chrome, 210, 20, 10, 10,
+                              LV_RADIUS_CIRCLE, t->text_muted, LV_OPA_COVER);
+    s_footer = ui_glass_platter_create(
+        s_runtime.screen, 14, 272, 212, 36, t);
+    s_footer_label = ui_glass_label(
+        s_footer, "UP NEXT  MOVE  USE",
+        &lv_font_montserrat_14, t->text_muted);
+    // Footer copy changes by page, so give it one stable text slot instead of
+    // re-centering an auto-sized label after every string replacement.
+    lv_obj_set_pos(s_footer_label, 0, 7);
+    lv_obj_set_size(s_footer_label, 212, 20);
+    lv_obj_set_style_text_align(s_footer_label, LV_TEXT_ALIGN_CENTER, 0);
+
+    s_footer_left = text_at(s_footer, "", 6, 7, &lv_font_montserrat_14, t->text_muted);
+    s_footer_right = text_at(s_footer, "", 108, 7, &lv_font_montserrat_14, t->text_muted);
+    lv_obj_set_size(s_footer_left, 98, 20);
+    lv_obj_set_size(s_footer_right, 98, 20);
+    lv_label_set_long_mode(s_footer_left, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(s_footer_right, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(s_footer_right, LV_TEXT_ALIGN_RIGHT, 0);
+
+    s_scene = scene_create();
+    scene_build(s_page, s_scene);
+    shell_refresh();
+    lv_screen_load(s_runtime.screen);
+    start_scene_showcase();
+    // 主定时器最后创建：此时屏幕与 chrome 都已就位，第一个 tick 就能安全刷新。
+    s_tick_timer = lv_timer_create(master_tick, SHOWCASE_TICK_MS, NULL);
+    // This one-shot dashboard is the whole app, so the audio worker is
+    // intentionally app-lifetime. Codec / I2S setup is slow and optional; the
+    // worker applies the initial volume without delaying or risking UI startup.
+    audio_volume_worker_start();
+    audio_volume_set_async(s_device_volume);
+}
+
+void dashboard_exit(void)
+{
+    // 先停 timer 再删屏 —— 反过来会让回调访问已释放对象。
+    // 这里不停 BLE：链路是应用级常驻服务，不属于任何单页。
+    if (s_tick_timer) {
+        lv_timer_delete(s_tick_timer);
+        s_tick_timer = NULL;
+    }
+    stop_tour();
+    stop_scene_activity();
+    lv_anim_delete(&s_page_motion, page_transition_set);
+    s_transitioning = false;
+    ui_glass_set_optics_suppressed(false);
+    ui_glass_runtime_deinit(&s_runtime);
+    s_scene_host = NULL;
+    s_scene = NULL;
+    s_header_chrome = NULL;
+    s_header_title = NULL;
+    s_link_dot = NULL;
+    s_battery_label = NULL;
+    s_footer = NULL;
+    s_footer_label = NULL;
+    s_footer_left = NULL;
+    s_footer_right = NULL;
+    memset(&s_page_motion, 0, sizeof(s_page_motion));
+    memset(&s_kaboo_view, 0, sizeof(s_kaboo_view));
+    memset(&s_claude_view, 0, sizeof(s_claude_view));
+}
+
+// 页内模式下的方向键：移动焦点、调值或切换页内状态。
+static void scene_step_direction(int8_t delta)
+{
+    switch (s_page) {
+    case PAGE_SETTINGS: {
+        uint8_t first = ui_dashboard_settings_first(s_settings_selection);
+        s_settings_selection = ui_dashboard_card_next(
+            s_settings_selection, PAGE_SETTINGS, delta);
+        if (first != ui_dashboard_settings_first(s_settings_selection)) {
+            // Next/previous group: rewrite the rows in place (the lens jumps,
+            // as it did when the page was rebuilt) and keep the chrome as is.
+            settings_rows_update(s_focus_lens);
+        } else {
+            focus_move(delta);
+        }
+        break;
+    }
+    case PAGE_KABOO:
+        s_kaboo_card = ui_dashboard_card_next(
+            s_kaboo_card, KABOO_CARD_COUNT, delta);
+        s_card_elapsed_ms = 0;
+        s_card_hold_ms = CARD_MANUAL_HOLD_MS;
+        refresh_data_page();
+        break;
+    case SHOWCASE_OVERLAYS:
+        if (s_morph.open) {
+            s_morph.item = (uint8_t)((s_morph.item + 3u +
+                                      (delta < 0 ? -1 : 1)) % 3u);
+            morph_menu_refresh(true);
+        } else {
+            morph_toggle();          // 菜单收起时，方向键先把它打开
+        }
+        break;
+    case SHOWCASE_ADJUSTMENTS:
+        // Physical UP raises the focused value; DOWN lowers it.
+        adjustment_change(delta < 0 ? 1 : -1);
+        break;
+    case SHOWCASE_FEEDBACK:
+        s_feedback_state = (uint8_t)((s_feedback_state + 3u +
+                                     (delta < 0 ? -1 : 1)) % 3u);
+        feedback_refresh(true);
+        break;
+    default:
+        focus_move(delta);
+        break;
+    }
+}
+
+void dashboard_key(bsp_btn_t button, bsp_btn_ev_t event)
+{
+    // 任何按键都永久停止无人巡航，并让当前场景的自动演示让位给用户。
+    stop_tour();
+    stop_scene_timer();
+    if (s_transitioning) return;
+
+    // 长按 OK 切换模式。没有页内交互的页面（Home、Claude）留在浏览模式。
+    if (event == BSP_BTN_LONG) {
+        if (button != BSP_BTN_OK) return;
+        if (s_scene_mode) {
+            s_scene_mode = false;
+        } else if (page_has_scene_interaction(s_page)) {
+            s_scene_mode = true;
+        } else {
+            return;                  // 无页内交互：不进入，也不改 chrome
+        }
+        s_mode_hint_ms = 3000;
+        shell_refresh();
+        return;
+    }
+    if (event != BSP_BTN_CLICK) return;
+    if (s_mode_hint_ms) {
+        s_mode_hint_ms = 0;
+        shell_refresh();
+    }
+
+    if (!s_scene_mode) {
+        // 浏览模式：UP/DOWN 就是翻页，符合三键设备的通用直觉。
+        if (button == BSP_BTN_UP) {
+            navigate_showcase_page(-1);
+        } else if (button == BSP_BTN_DOWN) {
+            navigate_showcase_page(1);
+        } else if (button == BSP_BTN_OK) {
+            // OK 在浏览模式下执行本页主操作，不需要先进页内模式。
+            if (s_page == PAGE_KABOO) {
+                kaboo_card_advance();
+                s_card_hold_ms = CARD_MANUAL_HOLD_MS;
+            } else if (s_page == SHOWCASE_OVERLAYS) {
+                morph_toggle();
+            } else if (!is_data_page(s_page)) {
+                focused_action();
+            }
+        }
+        return;
+    }
+
+    // 页内模式：方向键移焦点/切状态，OK 执行焦点动作。
+    if (button == BSP_BTN_UP) {
+        scene_step_direction(-1);
+    } else if (button == BSP_BTN_DOWN) {
+        scene_step_direction(1);
+    } else if (button == BSP_BTN_OK) {
+        if (s_page == SHOWCASE_OVERLAYS && s_morph.open) {
+            focused_action();
+        } else if (!is_data_page(s_page)) {
+            focused_action();
+        } else if (s_page == PAGE_KABOO) {
+            kaboo_card_advance();
+            s_card_hold_ms = CARD_MANUAL_HOLD_MS;
+        }
+    }
+}

@@ -9,15 +9,14 @@
 This document defines the durable visual and interaction boundary of the
 hardware-native Glass System. The current foundation implements tokens, four
 accessibility profiles, deterministic motion, three-button focus, core content
-and control components, adaptive display quality, an eight-scene showcase, and a
-separate legacy Motion Lab. Device cost fields remain pending until the current
+and control components, adaptive display quality, eight showcase scenes, and two live usage pages. Device cost fields remain pending until the current
 build is flashed and measured on the physical board.
 
 ## Direction contract
 
 - **Thesis:** one optically active control plane floats above stable content.
-- **Visual world:** a deep photographic background, full-bleed quiet content
-  canvases, restrained cool light, and glass reserved for action and focus.
+- **Visual world:** a deep graphite background with satin folds of cool light,
+  full-bleed quiet content canvases, and glass reserved for action and focus.
 - **First view:** the content layer explains itself immediately; the persistent
   bottom platter communicates input and page position without covering content.
 - **Signature interaction:** one trigger expands into its own menu with a
@@ -80,7 +79,7 @@ three-card study without making that layout a framework default.
 | Focus | 320 ms | continuous movement of one shared focus lens |
 | Materialize | 520 ms | material and content becoming available |
 | Morph | 560 ms | trigger becoming menu, popover, or sheet |
-| Page | 640 ms | whole-scene continuity at the panel's visible cadence |
+| Page | 400 ms | whole-scene continuity at the panel's visible cadence |
 
 `ui_glass_motion.*` provides integer cubic easing, a deterministic spring with
 one restrained overshoot, and reusable morph geometry. Reduced Motion keeps an
@@ -88,14 +87,15 @@ one restrained overshoot, and reusable morph geometry. Reduced Motion keeps an
 
 ## Input and focus
 
-- A short UP press advances to the next showcase page; double UP returns to the
-  previous page.
-- DOWN performs the current scene's secondary action, normally advancing the
-  shared Focus Model.
-- OK activates the focused control or performs the scene's primary action.
-- Long OK remains the repository-wide return-to-menu action.
-- Auto tour starts on the initial Player scene, demonstrates every scene's
-  primary motion and state feedback, and stops on the first physical input.
+- Browse mode: UP/DOWN select the previous/next page; OK performs its primary action.
+- Long OK enters or exits scene controls; Home and Claude remain read-only.
+- Scene controls: UP/DOWN move focus or change values; OK activates the selection.
+  Controls uses OK for the next row. Kaboo uses UP/DOWN for previous/next cards.
+- The footer briefly explains long OK at page entry and mode changes. Page names
+  remain intact in the header, and scene mode uses the accent title color.
+- Page tours and automatic scene demonstrations are disabled by default. Kaboo
+  rotates every eight seconds, pauses during scene controls, and delays rotation
+  after a manual card change.
 
 Focus is an object with a continuous trajectory, not a per-row border that
 appears and disappears. The focused state remains visible even when motion is
@@ -108,7 +108,7 @@ selected, disabled, loading, and error. Accessibility profiles are variants of
 the same component, not detached copies.
 
 The initial reusable C API includes content panel, glass platter, focus lens,
-row, toggle, and slider. Morph menu, dock, and device status are proven in the
+row, toggle, and slider. Morph menu and device status are proven in the
 showcase and must be extracted before being advertised as reusable APIs. The
 complete honest inventory is `design/liquid-glass/components.json`.
 
@@ -118,14 +118,14 @@ dirty pixels, and typical and worst frame time. Unknown device values stay
 
 ## Patterns and showcase
 
-The on-device showcase is an eight-scene interaction and motion reel. It keeps
-the original component coverage but presents it through credible mobile-style
-contexts instead of implementation categories. The page order is deliberately
-different from the stable internal component identifiers:
+The on-device showcase is an eight-scene interaction and motion reel. It
+presents its components through credible mobile-style contexts instead of
+implementation categories. The page order is deliberately different from the
+stable internal component identifiers:
 
 1. Player: edge-to-edge media content, playback state, and a source-origin
    Quick Actions morph
-2. Home: floating Dock navigation with continuous selection and content motion
+2. Home: a greeting card and a hero with a battery ring and the clock/date
 3. Focus: segmented mode selection, a toggle, choices, and one moving Focus Lens
 4. Controls: an animated glass slider thumb, stepper, and progress adjustment
 5. Devices: list traversal, persistent focus, and row activation feedback
@@ -136,18 +136,31 @@ different from the stable internal component identifiers:
 8. Appearance: Standard, High Contrast, Reduced Transparency, and Reduced Motion
    as selectable system profiles
 
-UP is the invariant page key. DOWN and OK remain available to the current scene,
-so the device demonstrates two meaningful interactions without changing the
-navigation grammar on every page. Rapid focus, toggle, slider, and segmented
-input retargets the existing visual object from its sampled position rather than
-starting competing animations. The unattended loop covers Player menu morph and
-selection, all Dock destinations, segmented/toggle/focus motion, all three
-adjustment types, multiple list rows, all Activity states, all Moments actions,
-and application of the next Appearance profile.
+Kaboo and Claude follow Appearance as the ninth and tenth pages, and Settings is
+the eleventh. Kaboo labels its token count and model; Claude labels percentages
+as used quota. Both show source age and visually distinguish stale values.
+Sample content and actions are identified as demonstrations. Controls shows real
+brightness and volume, including unavailable audio, while battery samples arrive
+once per minute. Home's battery ring and clock/date hero are refreshed from the
+device clock; BLE computer payloads and `ntp1.aliyun.com` provide synchronization.
 
-The old three-card deck remains available as Motion Lab. It demonstrates
-continuous depth exchange and compositor optimization, but it is not the
-default product pattern.
+Rapid focus, toggle, slider, and segmented input retargets the existing visual
+object from its sampled position rather than starting competing animations.
+High Contrast and Reduced Transparency apply to content canvases and to the
+Player, Home, and live-data surfaces as well as shared controls.
+
+
+Home is the fixed default landing page and remains visible. Settings is the
+eleventh page and also remains available. It lists ten content pages
+in presentation order, with four checkboxes per view. In scene mode UP/DOWN
+move selection and OK toggles visibility. Startup, page navigation, and footer
+neighbours follow the visible set; hiding optional pages leaves Home and Settings
+reachable. Home cannot be toggled off.
+A stable-ID bit mask is stored in application NVS under namespace `dashboard`,
+key `pages_v1`, without touching identity or Recovery. The UI publishes atomic
+snapshots and the application task coalesces writes once per second. Only a
+successful save is acknowledged; failure retains live session choices and
+shows an error.
 
 ## Runtime and performance
 
@@ -156,14 +169,24 @@ quality controller with hysteresis:
 
 | Quality | Refresh period | Animated glass limit | Glint |
 | --- | ---: | ---: | --- |
-| Full | 10 ms | 6 | enabled |
-| Balanced | 16 ms | 3 | enabled |
+| Full | 16 ms | 6 | enabled |
+| Balanced | 25 ms | 3 | enabled |
 | Economy | 33 ms | 1 | disabled |
 
-Three consecutive slow samples may reduce quality; six fast samples are needed
-to restore it. One full-screen transition cannot permanently downgrade the UI.
-The BSP publishes one-second snapshots for update rate, CPU render time, DMA
-wait, SPI wire-time floor, updated pixels, invalidation requests, and DMA heap.
+The refresh period also paces LVGL's animation timer, so it is the real motion
+cadence: about 60, 40, and 30 frames per second. Page transitions lock Economy
+while they run. The dashboard feeds each one-second BSP sample (average submit
+time and pixels per update) to the controller. Three consecutive slow samples
+may reduce quality; six fast samples are needed to restore it. One full-screen
+transition cannot permanently downgrade the UI. The BSP publishes one-second
+snapshots for update rate, CPU render time, DMA wait, SPI wire-time floor,
+updated pixels, invalidation requests, and DMA heap.
+
+The compositor decodes the indexed (LGP8) wallpaper straight into LVGL's draw
+buffer, one palette lookup per pixel. Full-bleed content canvases are drawn in
+the same pass through a pre-tinted copy of that palette, so the quieted
+wallpaper costs no per-pixel blend; the canvas objects stay transparent and
+only supply geometry.
 
 ## Prohibited defaults
 

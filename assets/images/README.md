@@ -13,10 +13,29 @@ Store reusable source images and generated display assets here.
 
 ## Liquid Glass wallpaper
 
-- `liquid_glass_wallpaper_source.jpg`: 720 × 960 source crop used for review and future reprocessing.
-- `liquid_glass_wallpaper.rgb565`: 240 × 320 little-endian RGB565 firmware asset; generated with `python tools/build_liquid_glass_wallpaper.py`.
-- Integration: embedded from `main/CMakeLists.txt` and rendered directly from Flash by `main/ui_glass.c`; no full-screen decode buffer is allocated.
-- Optimization: the static blue tint and title-readability gradient are baked
-  into the RGB565 asset so redraws do not alpha-blend two full-screen layers.
-- Source: [Unsplash glass wallpaper search](https://unsplash.com/s/photos/glass-wallpaper), image asset `photo-1706101299176-292d8c5e470e`.
-- License: [Unsplash License](https://unsplash.com/license).
+- `liquid_glass_wallpaper.lgp8`: 240 × 320 indexed ("LGP8") firmware asset
+  showing graphite satin folds: a 12-byte header, a 256-entry little-endian
+  RGB565 palette and one palette index per pixel, 77,324 bytes in total. The
+  dithered scene uses 137 colors, so the encoding is lossless;
+  `main/liquid_glass_compositor_core.h` documents the byte layout. Generated
+  with `python tools/build_liquid_glass_wallpaper.py` (requires `ffmpeg`).
+  `--from-rgb565 <raster>` re-encodes an existing 240 × 320 little-endian
+  RGB565 raster without `ffmpeg`. A raster with more than 256 colors is
+  rejected instead of being quantized again.
+- Source: an original procedural scene defined in that script and rendered at
+  720 × 960 with 16-bit precision, so the script is the editable source. Pass
+  `--source <image>` to build from another image instead.
+- Integration: embedded from `main/CMakeLists.txt`.
+  `main/ui_glass_compositor.c` validates it once, copies the 512-byte palette
+  to RAM and decodes rows from Flash straight into LVGL's draw buffer; no
+  full-screen decode buffer is allocated.
+- Optimization: the static neutral tint and title-readability gradient are
+  baked into the asset so redraws do not alpha-blend two full-screen layers.
+  A 4 × 4 ordered dither keeps the dark gradients from banding in RGB565.
+  One byte per pixel halves the Flash reads of the previous RGB565 raster,
+  and the compositor dims the wallpaper under a page's content canvas by
+  decoding through a pre-tinted copy of the palette.
+- Rim colors: the script prints the `WALLPAPER_CENTER_SAMPLES` rows for
+  `main/ui_glass_optics.c`. Update them with every new asset;
+  `tools/validate.sh` runs `--check-samples` and fails if they drift.
+- License: original work, covered by the repository [license](../../LICENSE).

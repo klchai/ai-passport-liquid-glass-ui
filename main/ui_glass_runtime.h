@@ -17,13 +17,14 @@ typedef struct {
 } ui_glass_runtime_t;
 
 // Creates a screen, native RGB565 wallpaper compositor, and bounded refresh
-// policy. Call only while the LVGL lock is held.
+// policy. The quality tier sets the period of LVGL's display refresh timer
+// and of its global animation timer. Call only while the LVGL lock is held.
 bool ui_glass_runtime_init(ui_glass_runtime_t *runtime,
                            ui_glass_mode_t mode,
                            ui_glass_quality_t quality);
 
-// Restores the repository-wide LVGL refresh period and deletes the owned
-// screen. The page must stop its own timers and animations first.
+// Restores LVGL's default refresh and animation periods and deletes the
+// owned screen. The page must stop its own timers and animations first.
 void ui_glass_runtime_deinit(ui_glass_runtime_t *runtime);
 
 const ui_glass_theme_t *ui_glass_runtime_theme(
@@ -35,7 +36,7 @@ void ui_glass_runtime_set_quality(ui_glass_runtime_t *runtime,
                                   bool locked);
 
 // Feeds display telemetry into the adaptive quality controller and applies a
-// new refresh period if the hysteresis changes level.
+// new refresh and animation period if the hysteresis changes level.
 bool ui_glass_runtime_observe(ui_glass_runtime_t *runtime,
                               uint16_t submit_ms_x10,
                               uint32_t pixels_per_update);

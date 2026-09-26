@@ -98,6 +98,24 @@ static void test_adaptive_quality_hysteresis(void)
     assert(controller.level == UI_GLASS_QUALITY_ECONOMY);
 }
 
+static void test_quality_cadence(void)
+{
+    // Each period paces both the display refresh and LVGL's animation timer,
+    // so lower tiers must never animate faster. Economy keeps LVGL's 33 ms
+    // default, which page transitions lock.
+    const ui_glass_quality_profile_t *full =
+        ui_glass_quality_profile(UI_GLASS_QUALITY_FULL);
+    const ui_glass_quality_profile_t *balanced =
+        ui_glass_quality_profile(UI_GLASS_QUALITY_BALANCED);
+    const ui_glass_quality_profile_t *economy =
+        ui_glass_quality_profile(UI_GLASS_QUALITY_ECONOMY);
+    assert(full->refresh_period_ms == 16);
+    assert(balanced->refresh_period_ms == 25);
+    assert(economy->refresh_period_ms == 33);
+    assert(full->refresh_period_ms < balanced->refresh_period_ms);
+    assert(balanced->refresh_period_ms < economy->refresh_period_ms);
+}
+
 int main(void)
 {
     test_theme_fallback_and_modes();
@@ -105,6 +123,7 @@ int main(void)
     test_focus_wrapping_and_clamping();
     test_motion_curves_and_morph();
     test_adaptive_quality_hysteresis();
+    test_quality_cadence();
     puts("ui_glass foundation tests: PASS");
     return 0;
 }
