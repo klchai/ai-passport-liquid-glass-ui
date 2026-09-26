@@ -6,6 +6,15 @@
 
 ## Unreleased
 
+- Removed features that repeated other pages. Home drops its Play and Link
+  tabs and the dock that switched between them: Play showed the same demo
+  track as Player, and Link claimed "Passport Linked" whatever the real
+  connection, which the header dot already shows on every page. Home is now
+  one card with the greeting, battery ring, time, and date, so it has no scene
+  controls and OK does nothing there; its footer rim now matches the other
+  pages. Player's status line no longer repeats "Demo | Passport linked"; it
+  stays empty until a Quick Action reports its demo result.
+
 - Cut the dashboard's drawing work without changing what it shows. Pages no
   longer redraw when nothing changed: the shell stopped moving its header to
   the front on every refresh, which repainted the whole screen on every mode

@@ -91,8 +91,8 @@ def scene(x: float, y: float) -> float:
     """Light added at (x, y), both in height-normalized units.
 
     Two satin folds rise toward the right edge so their lit sheets sit behind
-    the Home dock and the persistent footer, giving that glass something to
-    transmit. A faint third fold crosses the upper half; the top-left title
+    the lower half of each page and the persistent footer, giving the glass
+    there something to transmit. A faint third fold crosses the upper half; the top-left title
     area stays calm.
     """
     sheen = 0.70 + 0.30 * math.sin(5.0 * x - 3.0 * y + 0.8)

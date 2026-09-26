@@ -88,7 +88,7 @@ one restrained overshoot, and reusable morph geometry. Reduced Motion keeps an
 ## Input and focus
 
 - Browse mode: UP/DOWN select the previous/next page; OK performs its primary action.
-- Long OK enters or exits scene controls; Claude remains read-only.
+- Long OK enters or exits scene controls; Home and Claude remain read-only.
 - Scene controls: UP/DOWN move focus or change values; OK activates the selection.
   Controls uses OK for the next row. Kaboo uses UP/DOWN for previous/next cards.
 - The footer briefly explains long OK at page entry and mode changes. Page names
@@ -108,7 +108,7 @@ selected, disabled, loading, and error. Accessibility profiles are variants of
 the same component, not detached copies.
 
 The initial reusable C API includes content panel, glass platter, focus lens,
-row, toggle, and slider. Morph menu, dock, and device status are proven in the
+row, toggle, and slider. Morph menu and device status are proven in the
 showcase and must be extracted before being advertised as reusable APIs. The
 complete honest inventory is `design/liquid-glass/components.json`.
 
@@ -118,15 +118,14 @@ dirty pixels, and typical and worst frame time. Unknown device values stay
 
 ## Patterns and showcase
 
-The on-device showcase is an eight-scene interaction and motion reel. It keeps
-the original component coverage but presents it through credible mobile-style
-contexts instead of implementation categories. The page order is deliberately
-different from the stable internal component identifiers:
+The on-device showcase is an eight-scene interaction and motion reel. It
+presents its components through credible mobile-style contexts instead of
+implementation categories. The page order is deliberately different from the
+stable internal component identifiers:
 
 1. Player: edge-to-edge media content, playback state, and a source-origin
    Quick Actions morph
-2. Home: floating Dock navigation with continuous selection, a battery ring,
-   and a clock/date hero
+2. Home: a greeting card and a hero with a battery ring and the clock/date
 3. Focus: segmented mode selection, a toggle, choices, and one moving Focus Lens
 4. Controls: an animated glass slider thumb, stepper, and progress adjustment
 5. Devices: list traversal, persistent focus, and row activation feedback

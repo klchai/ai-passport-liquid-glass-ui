@@ -35,7 +35,7 @@ hidden. Automatic page tours and scene demos are disabled.
 | Long OK | Enter scene controls | Return to browsing |
 
 The footer briefly explains long OK when entering a page or switching modes.
-Claude has no scene controls. Kaboo supports previous/next cards and pauses
+Home and Claude have no scene controls. Kaboo supports previous/next cards and pauses
 its eight-second rotation while scene controls are active. Its cards show token
 usage and cost; Claude shows used quota and reset time. Both expose sample age.
 Showcase actions and sample device states are labeled Demo; they do not share

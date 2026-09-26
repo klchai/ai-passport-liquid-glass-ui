@@ -6,6 +6,13 @@
 
 ## Unreleased
 
+- 移除了与其他页面重复的功能。Home 去掉 Play、Link 两个标签以及切换它们的 dock：
+  Play 显示的是与 Player 相同的演示曲目；Link 不论实际是否连接都显示
+  "Passport Linked"，而 header 的链路点已经在每一页显示真实状态。Home 现在只有一张
+  卡片，显示问候语、电量圆环、时间与日期，因此没有页内操作，按 OK 也不再有反应；
+  它的 footer 光学边与其他页面一致。Player 的状态行不再重复
+  "Demo | Passport linked"，在选择 Quick Action 之前保持空白，之后显示演示结果。
+
 - 在不改变画面的前提下削减了仪表盘的绘制开销。内容没变时页面不再重绘：外壳不再在
   每次刷新时把标题栏移到最前（此前每次切换模式、提示到期、修改 Settings 都会重绘整屏），
   BLE 链路指示点也不再在空闲页面上每秒刷新屏幕五次；Kaboo 与 Claude 会跳过数据未变的

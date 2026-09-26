@@ -81,7 +81,7 @@ Material Engine 使用适合 RGB565 的预计算透明度、边缘、镜面高�
 ## 输入与焦点
 
 - 浏览模式：UP/DOWN 切换上一页/下一页，OK 执行页面主操作。
-- 长按 OK 进入或退出页内操作，Claude 保持只读。
+- 长按 OK 进入或退出页内操作，Home 与 Claude 保持只读。
 - 页内操作：UP/DOWN 移动焦点或调整值，OK 激活选项。Controls 使用 OK 切换下一行，
   Kaboo 使用 UP/DOWN 前后翻卡。
 - 进入页面或切换模式时，底栏短暂说明长按 OK 的作用。页眉保留完整页名，
@@ -98,7 +98,7 @@ Focus 是沿连续轨迹移动的对象，不是每个 Row 各自凭空出现和
 状态。无障碍 Profile 是同一组件的 Variant，不是互不关联的复制品。
 
 首批可复用 C API 包含 Content Panel、Glass Platter、Focus Lens、Row、Toggle 和
-Slider。Morph Menu、Dock 和 Device Status 已在 Showcase 中验证，但在抽取公共 API
+Slider。Morph Menu 和 Device Status 已在 Showcase 中验证，但在抽取公共 API
 前不能宣称为可复用组件。完整且诚实的清单见
 `design/liquid-glass/components.json`。
 
@@ -107,11 +107,11 @@ Slider。Morph Menu、Dock 和 Device Status 已在 Showcase 中验证，但在�
 
 ## Patterns 与 Showcase
 
-真机 Showcase 是八场景交互与动效作品集。它保留原组件覆盖范围，但以可信的手机式
-场景承载，不再把实现分类直接展示给观众。页面顺序与稳定的内部组件标识刻意解耦：
+真机 Showcase 是八场景交互与动效作品集。它以可信的手机式场景承载组件，不再把
+实现分类直接展示给观众。页面顺序与稳定的内部组件标识刻意解耦：
 
 1. Player：通栏媒体内容、播放状态，以及从原控件展开的 Quick Actions Morph
-2. Home：带连续选区与内容运动的悬浮 Dock 导航，以及电量圆环和时间/日期卡片
+2. Home：问候语卡片，以及带电量圆环和时间/日期的卡片
 3. Focus：分段模式、Toggle、选择项，以及唯一且连续移动的 Focus Lens
 4. Controls：带动画的玻璃 Slider Knob、Stepper 和可调 Progress
 5. Devices：列表遍历、持续焦点与 Row 激活反馈

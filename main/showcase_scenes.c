@@ -90,11 +90,11 @@ static bool is_data_page(showcase_page_t page)
     return page == PAGE_KABOO || page == PAGE_CLAUDE;
 }
 
-// 该页是否有值得进入页内模式的交互。Claude 两卡同屏、无可操作元素，
-// 长按 OK 在它上面无效。
+// 该页是否有值得进入页内模式的交互。Home 只有一张状态卡，Claude 两卡同屏，
+// 都没有可操作元素，长按 OK 在它们上面无效。
 static bool page_has_scene_interaction(showcase_page_t page)
 {
-    return page != PAGE_CLAUDE;
+    return page != SHOWCASE_NAVIGATION && page != PAGE_CLAUDE;
 }
 
 typedef struct {
@@ -132,27 +132,13 @@ typedef struct {
 } morph_view_t;
 
 typedef struct {
-    lv_obj_t *panel;
-    lv_obj_t *dock;
-    lv_obj_t *dock_shadow;
-    lv_obj_t *selection;
-    lv_obj_t *selection_shadow;
-    lv_obj_t *content;
     lv_obj_t *title;
     lv_obj_t *subtitle;
     lv_obj_t *hero;
     lv_obj_t *battery_ring;
     lv_obj_t *battery_percent;
-    lv_obj_t *status_icon;
     lv_obj_t *state_label;
     lv_obj_t *value_label;
-    lv_obj_t *tab_items[3];
-    int16_t start_x;
-    int16_t target_x;
-    int8_t direction;
-    uint8_t target_index;
-    bool content_swapped;
-    bool animating;
 } navigation_view_t;
 
 typedef struct {
@@ -288,7 +274,6 @@ static bool s_selection_check = true;
 static bool s_selection_radio = true;
 static uint8_t s_control_slider = 100;
 static uint8_t s_stepper_value = 3;
-static uint8_t s_navigation_index;
 static uint8_t s_settings_selection;
 static lv_obj_t *s_settings_note;
 // Settings shows four page rows at a time. Moving to another group rewrites
@@ -305,7 +290,6 @@ static QueueHandle_t s_audio_volume_queue;
 typedef enum { AUDIO_STARTING, AUDIO_READY, AUDIO_UNAVAILABLE } audio_status_t;
 static atomic_int s_audio_status = AUDIO_STARTING;
 
-static void navigation_motion_set(void *value, int32_t progress);
 static void segment_motion_set(void *value, int32_t progress);
 static void press_set(void *object, int32_t inset);
 static void focused_action(void);
@@ -494,8 +478,8 @@ static void reference_glass_apply(lv_obj_t *surface, uint32_t base_tint,
     // 景深（Player 整块展开玻璃、Controls 景深步进器拨满）在边上直接丢级。
     // 110 也并未出族：出货 UI 里 toggle/slider 拇指 = focus*8/9 = 112（外环 94）、
     // focus 透镜 126/148/136（外环 105 起），110 恰好夹在 CLEAR 种子 102 与拇指
-    // 112 之间。另两个调用点不受影响：Home dock 固定 depth=1（86 = REGULAR
-    // 标称），Controls 合并底板跟随步进器 0..4 本就需要完整五档。
+    // 112 之间。另一个调用点不受影响：Controls 合并底板跟随步进器 0..4，
+    // 本就需要完整五档。
     ui_glass_surface_set_edge_strength(surface, 78 + depth * 8);
 }
 
@@ -513,11 +497,11 @@ static lv_obj_t *reference_glass_create(lv_obj_t *parent,
         parent, x, y, width, height, radius, tint, opacity,
         UI_GLASS_MATERIAL_REGULAR);
     reference_glass_apply(surface, tint, opacity, depth);
-    // All three callers (Controls merged panel, Home dock, Player morph face)
-    // live on the control plane, so High Contrast / Reduce Transparency must
-    // swap in the CONTRAST archive (rings 60/20/6, specular 64, narrower
-    // glint) instead of staying REGULAR. The depth rim written above still
-    // owns edge_strength; this only selects the ring/specular profile.
+    // Both callers (Controls merged panel, Player morph face) live on the
+    // control plane, so High Contrast / Reduce Transparency must swap in the
+    // CONTRAST archive (rings 60/20/6, specular 64, narrower glint) instead
+    // of staying REGULAR. The depth rim written above still owns
+    // edge_strength; this only selects the ring/specular profile.
     ui_glass_surface_set_material(surface, t->control_material);
     if (base_tint) *base_tint = tint;
     return surface;
@@ -571,7 +555,6 @@ static void stop_scene_activity(void)
     if (s_morph.surface) {
         lv_anim_delete(&s_morph, NULL);
     }
-    lv_anim_delete(&s_navigation, navigation_motion_set);
     memset(&s_morph, 0, sizeof(s_morph));
     memset(&s_navigation, 0, sizeof(s_navigation));
     memset(&s_feedback, 0, sizeof(s_feedback));
@@ -1576,8 +1559,9 @@ static void build_overlays(lv_obj_t *root)
                      5, height, LV_RADIUS_CIRCLE,
                      t->text, i == 2 ? 230 : 126);
     }
-    // 设备名与状态共用一行，避开播放器卡片和 footer。
-    s_player_demo_label = text_at(content, "Demo | Passport linked", 16, 198,
+    // Quick Actions 的演示结果显示在这一行，选择前为空。连接状态只由 header
+    // 的链路点表示，这里不再重复。行位避开播放器卡片和 footer。
+    s_player_demo_label = text_at(content, "", 16, 198,
                                    &lv_font_montserrat_14, t->text_muted);
 
     s_morph.dimmer = solid_object(scene, 0, 0,
@@ -1651,16 +1635,7 @@ static void navigation_clock_refresh(void)
     }
 
     // 每个 tick（SHOWCASE_TICK_MS）顺带刷新问候语，跨整点才会自动改口。
-    // 只在 Home 卡上：另外两张卡的标题不是问候语。
-    //
-    // content_swapped 这一关不能少：navigation_select 在动画一开始就把
-    // s_navigation_index 指向新卡，但屏幕上的内容要到 progress 过半才换。
-    // 只看 index 的话，从 Player/Link 切回 Home 的前半程会把仍在淡出的旧卡
-    // 标题当场改成问候语。
-    bool content_shows_current =
-        !s_navigation.animating || s_navigation.content_swapped;
-    if (s_navigation.title && s_navigation_index == 0 &&
-        content_shows_current) {
+    if (s_navigation.title) {
         const char *greeting = ui_dashboard_greeting(now.hour, synced);
         if (strcmp(lv_label_get_text(s_navigation.title), greeting) != 0) {
             lv_label_set_text(s_navigation.title, greeting);
@@ -1689,79 +1664,25 @@ static void navigation_battery_refresh(void)
     }
 }
 
-static void navigation_content_update(uint8_t index)
+// Home 只有一张状态卡：问候语，以及电量圆环加时间/日期。音乐与连接状态分别由
+// Player 页和 header 的链路点承担，这里不再重复。
+static void build_navigation(lv_obj_t *root)
 {
-    // index 0 没有固定标题：它的问候语跟随时钟，由下面的
-    // navigation_clock_refresh() 设置。
-    static const char *const titles[] = {
-        NULL, "Midnight Current", "Passport Linked",
-    };
-    static const char *const subtitles[] = {
-        "Demo | Ready for today", "Demo | Ambient mix", "Demo | Bluetooth link",
-    };
-    static const char *const symbols[] = {
-        LV_SYMBOL_HOME, LV_SYMBOL_PLAY, LV_SYMBOL_BLUETOOTH,
-    };
-    static const uint32_t colors[] = { 0x3B93C5, 0x5159B8, 0x167D69 };
-    if (index > 2) index = 0;
-
-    if (titles[index]) lv_label_set_text(s_navigation.title, titles[index]);
-    lv_label_set_text(s_navigation.subtitle, subtitles[index]);
-    ui_glass_surface_set_tint(s_navigation.hero, colors[index],
-                              accessible_opacity(LV_OPA_COVER));
-    lv_label_set_text(s_navigation.status_icon, symbols[index]);
-    if (index == 0) {
-        // 时间是这张卡的主信息，用与问候语同级的 montserrat_20。另两张卡的
-        // state_label 是 "PROGRESS"/"SIGNAL" 这类说明文字，跟着放大会盖过它
-        // 下面的数值，所以字号连同纵向位置都按卡片分别设置。
-        // 20px 行高 22 + 6px 间隙 + 14px 行高 16 = 44，块中心落在 42，
-        // 与电量环（hero 内 14..70）的中心一致。
-        lv_obj_set_style_text_font(s_navigation.state_label,
-                                   &lv_font_montserrat_20, 0);
-        lv_obj_set_y(s_navigation.state_label, 20);
-        lv_obj_set_y(s_navigation.value_label, 48);
-        lv_obj_add_flag(s_navigation.status_icon, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(s_navigation.battery_ring, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(s_navigation.battery_percent, LV_OBJ_FLAG_HIDDEN);
-        navigation_clock_refresh();
-        navigation_battery_refresh();
-    } else {
-        lv_obj_set_style_text_font(s_navigation.state_label,
-                                   &lv_font_montserrat_14, 0);
-        lv_obj_set_y(s_navigation.state_label, 22);
-        lv_obj_set_y(s_navigation.value_label, 46);
-        lv_obj_clear_flag(s_navigation.status_icon, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_navigation.battery_ring, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_navigation.battery_percent, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(s_navigation.state_label,
-                          index == 1 ? "PROGRESS" : "SIGNAL");
-        lv_label_set_text(s_navigation.value_label,
-                          index == 1 ? "42%" : "-48 dBm");
-    }
-}
-
-static void navigation_content_create(lv_obj_t *panel,
-                                      const ui_glass_theme_t *t)
-{
-    // Sized to the title card and hero (bottom at 152), not to the panel. A
-    // dock change slides and fades this container every frame and LVGL
-    // redraws its whole box, so the old 252 px height repainted the empty
-    // band and the glass dock under it on every frame.
-    s_navigation.content = plain_object(panel, 0, 0, 212, 152);
-    // 标题卡与 hero 用满 content 的 212 宽，与下方 dock / footer 左右对齐
-    // （三者绝对范围都是 14..226）。缩进会让上下两组差 16px，肉眼很明显。
-    solid_object(s_navigation.content, 0, 8, 212, 60,
+    const ui_glass_theme_t *t = theme();
+    lv_obj_t *panel = content_layer_create(root, 14, 6, 212, 152, t);
+    // 标题卡与 hero 用满 212 宽，与 footer 左右对齐（绝对范围都是 14..226）。
+    // 缩进会让上下两组差 16px，肉眼很明显。
+    solid_object(panel, 0, 8, 212, 60,
                  UI_GLASS_RADIUS_PANEL, 0x00101C, accessible_opacity(LV_OPA_20));
-    s_navigation.title = text_at(s_navigation.content, "", 16, 18,
+    // 标题是跟随时钟的问候语，由 navigation_clock_refresh() 设置。
+    s_navigation.title = text_at(panel, "", 16, 18,
                                  &lv_font_montserrat_20, t->text);
-    s_navigation.subtitle = text_at(s_navigation.content, "", 16, 47,
+    s_navigation.subtitle = text_at(panel, "Demo | Ready for today", 16, 47,
                                     &lv_font_montserrat_14, t->text_muted);
 
-    // hero 与上方标题卡同宽同圆角，也与 dock / footer 对齐（绝对 14..226）。
-    // 高度 76：hero 在 panel（root y=6）内底边为 rel 152，即 root y=158；
-    // dock 上移后顶边 root y=164，两者实色卡与玻璃面间隔 6px。
+    // hero 与上方标题卡同宽同圆角，底边在 panel 内 rel 152，即 root y=158。
     s_navigation.hero = ui_glass_surface_create(
-        s_navigation.content, 0, 76, 212, 76, UI_GLASS_RADIUS_PANEL,
+        panel, 0, 76, 212, 76, UI_GLASS_RADIUS_PANEL,
         0x3B93C5, accessible_opacity(LV_OPA_COVER), t->control_material);
     // The hero is an opaque content card, but its perimeter still needs the
     // same restrained optical cue as the surrounding floating surfaces.
@@ -1798,178 +1719,19 @@ static void navigation_content_create(lv_obj_t *panel,
     lv_obj_set_size(s_navigation.battery_percent, 56, 20);
     lv_obj_set_style_text_align(s_navigation.battery_percent,
                                 LV_TEXT_ALIGN_CENTER, 0);
-    s_navigation.status_icon = ui_glass_label(
-        s_navigation.hero, "", &lv_font_montserrat_20, t->text);
-    lv_obj_set_pos(s_navigation.status_icon, 14, 29);
-    lv_obj_set_size(s_navigation.status_icon, 56, 28);
-    lv_obj_set_style_text_align(s_navigation.status_icon,
-                                LV_TEXT_ALIGN_CENTER, 0);
+    // 时间是这张卡的主信息，用与问候语同级的 montserrat_20。
+    // 20px 行高 22 + 6px 间隙 + 14px 行高 16 = 44，块中心落在 42，
+    // 与电量环（hero 内 14..70）的中心一致。
     s_navigation.state_label = text_at(
-        s_navigation.hero, "", 88, 22, &lv_font_montserrat_14, t->text);
+        s_navigation.hero, "", 88, 20, &lv_font_montserrat_20, t->text);
     lv_obj_set_width(s_navigation.state_label, 116);
     s_navigation.value_label = text_at(
-        s_navigation.hero, "", 88, 46, &lv_font_montserrat_14, t->text_muted);
+        s_navigation.hero, "", 88, 48, &lv_font_montserrat_14, t->text_muted);
     lv_obj_set_width(s_navigation.value_label, 116);
     lv_label_set_long_mode(s_navigation.value_label, LV_LABEL_LONG_DOT);
 
-    navigation_content_update(s_navigation_index);
-}
-
-static void navigation_refresh_tabs(uint8_t selected)
-{
-    const ui_glass_theme_t *t = theme();
-    for (uint8_t i = 0; i < 3; ++i) {
-        // 选中项压在浅 accent pill 上：用深色 content_surface，近白 text
-        // 在四套主题下对比度都只有约 2.1–2.7:1。
-        uint32_t color = i == selected ? t->content_surface : t->text_muted;
-        set_label_color(s_navigation.tab_items[i], color);
-    }
-}
-
-static void navigation_motion_set(void *value, int32_t progress)
-{
-    navigation_view_t *navigation = value;
-    if (!navigation || !navigation->selection) return;
-    int32_t spring = ui_glass_spring(progress);
-    int16_t selection_x = (int16_t)ui_glass_interpolate(
-        navigation->start_x, navigation->target_x, spring);
-    lv_obj_set_x(navigation->selection, selection_x);
-    if (navigation->selection_shadow) {
-        lv_obj_set_x(navigation->selection_shadow, selection_x + 2);
-    }
-
-    if (navigation->content) {
-        if (progress < 500) {
-            int32_t phase = progress * UI_GLASS_MOTION_PROGRESS_MAX / 500;
-            lv_obj_set_x(navigation->content,
-                         -navigation->direction * 16 * phase /
-                             UI_GLASS_MOTION_PROGRESS_MAX);
-            lv_obj_set_style_opa(
-                navigation->content,
-                (lv_opa_t)(255 - 255 * phase /
-                           UI_GLASS_MOTION_PROGRESS_MAX), 0);
-        } else {
-            if (!navigation->content_swapped) {
-                // 先置位再换内容：navigation_content_update 内部会调
-                // navigation_clock_refresh，而后者靠这个标志判断屏幕上的
-                // 内容是否已经是目标卡，没置位就会跳过问候语。
-                navigation->content_swapped = true;
-                navigation_content_update(navigation->target_index);
-            }
-            int32_t phase = (progress - 500) * UI_GLASS_MOTION_PROGRESS_MAX /
-                            (UI_GLASS_MOTION_PROGRESS_MAX - 500);
-            if (phase > UI_GLASS_MOTION_PROGRESS_MAX) {
-                phase = UI_GLASS_MOTION_PROGRESS_MAX;
-            }
-            lv_obj_set_x(navigation->content,
-                         navigation->direction * 16 *
-                             (UI_GLASS_MOTION_PROGRESS_MAX - phase) /
-                             UI_GLASS_MOTION_PROGRESS_MAX);
-            lv_obj_set_style_opa(
-                navigation->content,
-                (lv_opa_t)(255 * phase / UI_GLASS_MOTION_PROGRESS_MAX), 0);
-        }
-    }
-}
-
-static void navigation_motion_finish(navigation_view_t *navigation)
-{
-    if (!navigation) return;
-    if (!navigation->content_swapped) {
-        // 同 navigation_motion_set：先置位，让 content_update 里的
-        // clock_refresh 知道内容已经是目标卡。
-        navigation->content_swapped = true;
-        navigation_content_update(navigation->target_index);
-    }
-    navigation->animating = false;
-    if (navigation->content) {
-        lv_obj_set_x(navigation->content, 0);
-        lv_obj_set_style_opa(navigation->content, LV_OPA_COVER, 0);
-    }
-}
-
-static void navigation_motion_completed(lv_anim_t *animation)
-{
-    navigation_motion_finish(lv_anim_get_user_data(animation));
-}
-
-static void navigation_select(int8_t direction)
-{
-    if (!s_navigation.panel || s_navigation.animating) return;
-    uint8_t next = (uint8_t)((s_navigation_index +
-                              (direction < 0 ? 2 : 1)) % 3);
-    s_navigation.animating = true;
-    s_navigation.direction = direction < 0 ? -1 : 1;
-    s_navigation.start_x = lv_obj_get_x(s_navigation.selection);
-    // 与 build_navigation 的 tab 起点保持一致（dock 加宽后为 10）。
-    s_navigation.target_x = (int16_t)(10 + next * 64);
-    s_navigation.target_index = next;
-    s_navigation.content_swapped = false;
-    s_navigation_index = next;
-    navigation_refresh_tabs(next);
-
-    uint16_t duration = ui_glass_motion_duration(
-        s_runtime.mode, UI_GLASS_MOTION_FOCUS);
-    if (duration == 0) {
-        navigation_motion_set(&s_navigation, UI_GLASS_MOTION_PROGRESS_MAX);
-        navigation_motion_finish(&s_navigation);
-        return;
-    }
-    lv_anim_t animation;
-    lv_anim_init(&animation);
-    lv_anim_set_var(&animation, &s_navigation);
-    lv_anim_set_user_data(&animation, &s_navigation);
-    lv_anim_set_exec_cb(&animation, navigation_motion_set);
-    lv_anim_set_values(&animation, 0, UI_GLASS_MOTION_PROGRESS_MAX);
-    lv_anim_set_duration(&animation, duration);
-    lv_anim_set_completed_cb(&animation, navigation_motion_completed);
-    lv_anim_start(&animation);
-}
-
-static void build_navigation(lv_obj_t *root)
-{
-    static const char *const tabs[] = {
-        LV_SYMBOL_HOME "\nHome",
-        LV_SYMBOL_PLAY "\nPlay",
-        LV_SYMBOL_BLUETOOTH "\nLink",
-    };
-    const ui_glass_theme_t *t = theme();
-    s_navigation.panel = content_layer_create(root, 14, 6, 212, 252, t);
-    navigation_content_create(s_navigation.panel, t);
-    // Dock 与常驻导航条同宽（x=14, w=212）同圆角（FLOATING=22）：两块浮动玻璃
-    // 上下相邻，宽度或圆角不一致会在两者之间读出一道台阶。
-    // 三个 tab 各 64 宽，居中留边 (212-192)/2 = 10。
-    // dock 底边与 footer 顶边必须留 8 个空扫描行：两者同宽同 r22，各画三层
-    // 1px 同心光学环，间隙只有 4px 时两簇三环会贴成"双线"（本页选中滑块
-    // 7-8px 间距是双轨消失的实测基准）。footer 是全局 shell（y=272），所以
-    // 间隙由本页的 dock 几何承担：rel y=164 + 场景偏移 44 = 绝对 208..263，
-    // 距 footer 顶边 272 恰好 8px。
-    s_navigation.dock_shadow = solid_object(
-        root, 16, 166, 208, 52, UI_GLASS_RADIUS_FLOATING,
-        0x01070D, 44);
-    s_navigation.dock = reference_glass_create(
-        root, 14, 164, 212, 56, UI_GLASS_RADIUS_FLOATING, 144, 1, t, NULL);
-    s_navigation.selection_shadow = solid_object(
-        s_navigation.dock, 12 + s_navigation_index * 64, 10, 60, 36,
-        UI_GLASS_RADIUS_CONTROL, 0x01070D, 28);
-    // 选中滑块与 Focus segmented 同构：材质 / 填充 / 光学边全部跟随主题，
-    // 高对比与降透明模式下不再停在 REGULAR + 70% accent。
-    s_navigation.selection = ui_glass_surface_create(
-        s_navigation.dock, 10 + s_navigation_index * 64, 8, 64, 40,
-        UI_GLASS_RADIUS_CONTROL, t->accent, accessible_opacity(LV_OPA_70),
-        t->control_material);
-    ui_glass_surface_set_edge_strength(s_navigation.selection,
-                                       t->focus_edge_strength);
-    for (uint8_t i = 0; i < 3; ++i) {
-        s_navigation.tab_items[i] = text_at(
-            s_navigation.dock, tabs[i], 10 + i * 64, 13,
-            &lv_font_montserrat_14, t->text_muted);
-        lv_obj_set_width(s_navigation.tab_items[i], 64);
-        lv_obj_set_style_text_align(s_navigation.tab_items[i],
-                                    LV_TEXT_ALIGN_CENTER, 0);
-        lv_obj_set_style_text_line_space(s_navigation.tab_items[i], -2, 0);
-    }
-    navigation_refresh_tabs(s_navigation_index);
+    navigation_clock_refresh();
+    navigation_battery_refresh();
 }
 
 static lv_obj_t *feedback_chip(lv_obj_t *parent, int x, int y, int width,
@@ -2664,9 +2426,7 @@ static void shell_refresh(void)
     ui_glass_surface_set_tint(s_footer, t->control_tint,
                               t->control_opacity);
     ui_glass_surface_set_material(s_footer, t->control_material);
-    ui_glass_surface_set_edge_strength(
-        s_footer, s_page == SHOWCASE_NAVIGATION ? t->focus_edge_strength / 2
-                                               : t->focus_edge_strength);
+    ui_glass_surface_set_edge_strength(s_footer, t->focus_edge_strength);
     // 导航条在每一页都可见：它现在承担导航信息，不再只是动作提示。
     ui_glass_set_hidden_if_changed(s_footer, false);
     link_dot_refresh();
@@ -2741,10 +2501,6 @@ static void scene_showcase_step(void)
         } else {
             scene_timer_finish();
         }
-        break;
-    case SHOWCASE_NAVIGATION:
-        if (s_scene_step <= 3) navigation_select(1);
-        else scene_timer_finish();
         break;
     case SHOWCASE_FEEDBACK:
         if (s_scene_step <= 3) focused_action();
@@ -2897,7 +2653,7 @@ static void master_tick(lv_timer_t *timer)
         else lv_label_set_text_fmt(s_battery_label, "%d%%", battery);
     }
     navigation_battery_refresh();
-    if (s_navigation_index == 0) navigation_clock_refresh();
+    navigation_clock_refresh();
     if (s_transitioning) return;
     adjustments_audio_refresh();
     settings_status_refresh();
@@ -3032,9 +2788,6 @@ static void focused_action(void)
                                      : "Paused  |  24 min");
             }
         }
-        break;
-    case SHOWCASE_NAVIGATION:
-        navigation_select(1);
         break;
     case SHOWCASE_FEEDBACK:
         s_feedback_state = (s_feedback_state + 1u) % 3u;
@@ -3195,9 +2948,6 @@ static void scene_step_direction(int8_t delta)
             morph_toggle();          // 菜单收起时，方向键先把它打开
         }
         break;
-    case SHOWCASE_NAVIGATION:
-        navigation_select(delta);
-        break;
     case SHOWCASE_ADJUSTMENTS:
         // Physical UP raises the focused value; DOWN lowers it.
         adjustment_change(delta < 0 ? 1 : -1);
@@ -3220,7 +2970,7 @@ void dashboard_key(bsp_btn_t button, bsp_btn_ev_t event)
     stop_scene_timer();
     if (s_transitioning) return;
 
-    // 长按 OK 切换模式。没有页内交互的页面（Claude）留在浏览模式。
+    // 长按 OK 切换模式。没有页内交互的页面（Home、Claude）留在浏览模式。
     if (event == BSP_BTN_LONG) {
         if (button != BSP_BTN_OK) return;
         if (s_scene_mode) {
