@@ -6,6 +6,10 @@
 
 ## Unreleased
 
+- 填补 Home 移除 dock 后留下的空白。时钟卡向下延伸到原 dock 的底边（距 footer
+  8 px），用 Kaboo 同款 44 px 大号数字显示时间，日期在其下方，电量圆环缩为 48 px
+  并在右侧垂直居中。即使是最宽的时间 00:00，与圆环之间也保留 8 px 间隙。
+
 - 对齐 Moments 的按钮与 Night Drive 卡片。Open moment、Share、Remove 三个按钮
   与卡片同宽，不再在两侧各缩进 6 px；焦点透镜随之加宽，仍保持 2 px 光晕。
 

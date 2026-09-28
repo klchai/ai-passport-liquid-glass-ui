@@ -6,6 +6,12 @@
 
 ## Unreleased
 
+- Filled the space Home's dock left behind. The clock card now reaches down to
+  where the dock ended, 8 px above the footer, and shows the time in the large
+  44 px digits used by Kaboo, with the date under it and the battery ring,
+  now 48 px, centred on its right. Even the widest time, 00:00, keeps 8 px of
+  clearance from the ring.
+
 - Aligned the Moments buttons with the Night Drive card. Open moment, Share,
   and Remove now span the card's full width instead of stopping 6 px short of
   each edge, and the focus lens widens with them to keep its 2 px halo.

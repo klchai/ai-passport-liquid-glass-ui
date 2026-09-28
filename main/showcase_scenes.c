@@ -1666,12 +1666,13 @@ static void navigation_battery_refresh(void)
     }
 }
 
-// Home 只有一张状态卡：问候语，以及电量圆环加时间/日期。音乐与连接状态分别由
-// Player 页和 header 的链路点承担，这里不再重复。
+// Home 只有问候语卡和时钟卡。音乐与连接状态分别由 Player 页和 header 的链路点
+// 承担，这里不再重复。时钟卡向下长到原 dock 的底边（root y=220，距 footer 8px），
+// 用大号数字显示时间，页面下方不再留空。
 static void build_navigation(lv_obj_t *root)
 {
     const ui_glass_theme_t *t = theme();
-    lv_obj_t *panel = content_layer_create(root, 14, 6, 212, 152, t);
+    lv_obj_t *panel = content_layer_create(root, 14, 6, 212, 214, t);
     // 标题卡与 hero 用满 212 宽，与 footer 左右对齐（绝对范围都是 14..226）。
     // 缩进会让上下两组差 16px，肉眼很明显。
     solid_object(panel, 0, 8, 212, 60,
@@ -1682,17 +1683,19 @@ static void build_navigation(lv_obj_t *root)
     s_navigation.subtitle = text_at(panel, "Demo | Ready for today", 16, 47,
                                     &lv_font_montserrat_14, t->text_muted);
 
-    // hero 与上方标题卡同宽同圆角，底边在 panel 内 rel 152，即 root y=158。
+    // hero 与上方标题卡同宽同圆角，底边在 panel 内 rel 214，即 root y=220。
     s_navigation.hero = ui_glass_surface_create(
-        panel, 0, 76, 212, 76, UI_GLASS_RADIUS_PANEL,
+        panel, 0, 76, 212, 138, UI_GLASS_RADIUS_PANEL,
         0x3B93C5, accessible_opacity(LV_OPA_COVER), t->control_material);
     // The hero is an opaque content card, but its perimeter still needs the
     // same restrained optical cue as the surrounding floating surfaces.
     ui_glass_surface_set_edge_strength(s_navigation.hero,
                                        t->focus_edge_strength / 2);
+    // 电量环在右侧垂直居中。最宽的时间 "00:00" 在 44px 数字字体下约 128px
+    // （x16..144），环放在 x152 起，任何时刻都与数字保留 8px 以上间隙。
     s_navigation.battery_ring = lv_arc_create(s_navigation.hero);
-    lv_obj_set_pos(s_navigation.battery_ring, 14, 14);
-    lv_obj_set_size(s_navigation.battery_ring, 56, 56);
+    lv_obj_set_pos(s_navigation.battery_ring, 152, 45);
+    lv_obj_set_size(s_navigation.battery_ring, 48, 48);
     lv_obj_remove_flag(s_navigation.battery_ring, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_opa(s_navigation.battery_ring, LV_OPA_TRANSP,
                             LV_PART_MAIN);
@@ -1717,19 +1720,19 @@ static void build_navigation(lv_obj_t *root)
     lv_arc_set_angles(s_navigation.battery_ring, 135, 135);
 
     s_navigation.battery_percent = text_at(
-        s_navigation.hero, "--%", 14, 32, &lv_font_montserrat_14, t->text);
-    lv_obj_set_size(s_navigation.battery_percent, 56, 20);
+        s_navigation.hero, "--%", 152, 61, &lv_font_montserrat_14, t->text);
+    lv_obj_set_size(s_navigation.battery_percent, 48, 20);
     lv_obj_set_style_text_align(s_navigation.battery_percent,
                                 LV_TEXT_ALIGN_CENTER, 0);
-    // 时间是这张卡的主信息，用与问候语同级的 montserrat_20。
-    // 20px 行高 22 + 6px 间隙 + 14px 行高 16 = 44，块中心落在 42，
-    // 与电量环（hero 内 14..70）的中心一致。
+    // 时间是这张卡的主信息，用 Kaboo 同款 44px 数字字体（含 ":" 与 "-"，未同步
+    // 时的 "--:--" 也能显示），与日期一起左对齐问候语。数字行高 31 + 8px 间隙 +
+    // 日期行高 16 = 55，块中心约在 69，与电量环（hero 内 45..93）的中心一致。
     s_navigation.state_label = text_at(
-        s_navigation.hero, "", 88, 20, &lv_font_montserrat_20, t->text);
-    lv_obj_set_width(s_navigation.state_label, 116);
+        s_navigation.hero, "", 16, 42, &font_digits_44, t->text);
+    lv_obj_set_width(s_navigation.state_label, 132);
     s_navigation.value_label = text_at(
-        s_navigation.hero, "", 88, 48, &lv_font_montserrat_14, t->text_muted);
-    lv_obj_set_width(s_navigation.value_label, 116);
+        s_navigation.hero, "", 16, 81, &lv_font_montserrat_14, t->text_muted);
+    lv_obj_set_width(s_navigation.value_label, 132);
     lv_label_set_long_mode(s_navigation.value_label, LV_LABEL_LONG_DOT);
 
     navigation_clock_refresh();
