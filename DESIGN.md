@@ -9,7 +9,7 @@
 This document defines the durable visual and interaction boundary of the
 hardware-native Glass System. The current foundation implements tokens, four
 accessibility profiles, deterministic motion, three-button focus, core content
-and control components, adaptive display quality, eight showcase scenes, and two live usage pages. Device cost fields remain pending until the current
+and control components, adaptive display quality, five showcase scenes, and two live usage pages. Device cost fields remain pending until the current
 build is flashed and measured on the physical board.
 
 ## Direction contract
@@ -108,8 +108,8 @@ selected, disabled, loading, and error. Accessibility profiles are variants of
 the same component, not detached copies.
 
 The initial reusable C API includes content panel, glass platter, focus lens,
-row, toggle, and slider. Morph menu and device status are proven in the
-showcase and must be extracted before being advertised as reusable APIs. The
+row, toggle, and slider. Device status is proven in the showcase and must be
+extracted before being advertised as a reusable API. The
 complete honest inventory is `design/liquid-glass/components.json`.
 
 Every public component must eventually publish RAM, Flash, typical and worst
@@ -118,49 +118,45 @@ dirty pixels, and typical and worst frame time. Unknown device values stay
 
 ## Patterns and showcase
 
-The on-device showcase is an eight-scene interaction and motion reel. It
+The on-device showcase is a five-scene interaction and motion reel. It
 presents its components through credible mobile-style contexts instead of
 implementation categories. The page order is deliberately different from the
 stable internal component identifiers:
 
-1. Player: edge-to-edge media content, playback state, and a source-origin
-   Quick Actions morph
-2. Home: a greeting card and a hero with a battery ring and the clock/date
-3. Focus: segmented mode selection, a toggle, choices, and one moving Focus Lens
-4. Controls: an animated glass slider thumb, stepper, and progress adjustment
-5. Devices: list traversal, persistent focus, and row activation feedback
-6. Activity: one coherent offline-sync flow across progress, paused, and error
+1. Home: a greeting card and a hero with a battery ring and the clock/date
+2. Controls: an animated glass slider thumb, stepper, and progress adjustment
+3. Devices: list traversal, persistent focus, and row activation feedback
+4. Activity: one coherent offline-sync flow across progress, paused, and error
    states
-7. Moments: a photographic content task with primary, glass, and destructive
-   actions
-8. Appearance: Standard, High Contrast, Reduced Transparency, and Reduced Motion
+5. Appearance: Standard, High Contrast, Reduced Transparency, and Reduced Motion
    as selectable system profiles
 
-Kaboo and Claude follow Appearance as the ninth and tenth pages, and Settings is
-the eleventh. Kaboo labels its token count and model; Claude labels percentages
+Kaboo and Claude follow Appearance as the sixth and seventh pages, and Settings
+is the eighth. Kaboo labels its token count and model; Claude labels percentages
 as used quota. Both show source age and visually distinguish stale values.
 Sample content and actions are identified as demonstrations. Controls shows real
 brightness and volume, including unavailable audio, while battery samples arrive
 once per minute. Home's battery ring and clock/date hero are refreshed from the
 device clock; BLE computer payloads and `ntp1.aliyun.com` provide synchronization.
 
-Rapid focus, toggle, slider, and segmented input retargets the existing visual
-object from its sampled position rather than starting competing animations.
-High Contrast and Reduced Transparency apply to content canvases and to the
-Player, Home, and live-data surfaces as well as shared controls.
+Rapid focus and slider input retargets the existing visual object from its
+sampled position rather than starting competing animations. High Contrast and
+Reduced Transparency apply to content canvases and to the Home and live-data
+surfaces as well as shared controls.
 
 
 Home is the fixed default landing page and remains visible. Settings is the
-eleventh page and also remains available. It lists ten content pages
+eighth page and also remains available. It lists seven content pages
 in presentation order, with four checkboxes per view. In scene mode UP/DOWN
 move selection and OK toggles visibility. Startup, page navigation, and footer
 neighbours follow the visible set; hiding optional pages leaves Home and Settings
 reachable. Home cannot be toggled off.
 A stable-ID bit mask is stored in application NVS under namespace `dashboard`,
-key `pages_v1`, without touching identity or Recovery. The UI publishes atomic
-snapshots and the application task coalesces writes once per second. Only a
-successful save is acknowledged; failure retains live session choices and
-shows an error.
+key `pages_v1`, without touching identity or Recovery. The retired Focus,
+Moments, and Player pages keep their ids, so no other page's bit moves; bits
+stored for them are ignored. The UI publishes atomic snapshots and the
+application task coalesces writes once per second. Only a successful save is
+acknowledged; failure retains live session choices and shows an error.
 
 ## Runtime and performance
 

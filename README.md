@@ -4,29 +4,28 @@
 
 # Liquid Glass UI on ESP32-C3
 
-An app combining eight interaction scenes, two live usage dashboards, and Settings
+An app combining five interaction scenes, two live usage dashboards, and Settings
 built for the AI Passport
 hardware: a 240×320 display, three physical buttons, 8 MB Flash, and no PSRAM.
 
 ![Liquid Glass UI on ESP32-C3](design/promo/liquid-glass-showcase-poster-v1-preview.jpg)
 
-This repository explores how translucent materials, focus movement, morphing,
-state feedback, and mobile-style navigation can remain expressive under tight
+This repository explores how translucent materials, focus movement, state
+feedback, and mobile-style navigation can remain expressive under tight
 microcontroller constraints. It is an independent design and engineering
 experiment and is not affiliated with Apple.
 
 ## The reel
 
-| Player | Home | Focus | Controls |
-| --- | --- | --- | --- |
-| <img src="design/screenshots/01-player.png" width="180" alt="Player scene"> | <img src="design/screenshots/02-home.png" width="180" alt="Home scene"> | <img src="design/screenshots/03-focus.png" width="180" alt="Focus scene"> | <img src="design/screenshots/04-controls.png" width="180" alt="Controls scene"> |
-| Devices | Activity | Moments | Appearance |
-| <img src="design/screenshots/05-devices.png" width="180" alt="Devices scene"> | <img src="design/screenshots/06-activity.png" width="180" alt="Activity scene"> | <img src="design/screenshots/07-moments.png" width="180" alt="Moments scene"> | <img src="design/screenshots/08-appearance.png" width="180" alt="Appearance scene"> |
+| Home | Controls | Devices | Activity | Appearance |
+| --- | --- | --- | --- | --- |
+| <img src="design/screenshots/02-home.png" width="150" alt="Home scene"> | <img src="design/screenshots/04-controls.png" width="150" alt="Controls scene"> | <img src="design/screenshots/05-devices.png" width="150" alt="Devices scene"> | <img src="design/screenshots/06-activity.png" width="150" alt="Activity scene"> | <img src="design/screenshots/08-appearance.png" width="150" alt="Appearance scene"> |
 
-The images above show the original eight-scene release. The current app opens
-on Home, followed by the enabled pages in presentation order, then Settings.
-Home and Settings are always available; the other ten content pages can be
-hidden. Automatic page tours and scene demos are disabled.
+The images above come from the original release; Home has since traded its
+tab dock for a larger clock. The current app opens on Home, followed by the
+enabled pages in presentation order, then Settings. Home and Settings are
+always available; the other six content pages can be hidden. Automatic page
+tours and scene demos are disabled.
 
 | Button | Browse mode | Scene controls |
 | --- | --- | --- |
@@ -38,8 +37,8 @@ The footer briefly explains long OK when entering a page or switching modes.
 Home and Claude have no scene controls. Kaboo supports previous/next cards and pauses
 its eight-second rotation while scene controls are active. Its cards show token
 usage and cost; Claude shows used quota and reset time. Both expose sample age.
-Showcase actions and sample device states are labeled Demo; they do not share
-content, connect devices, or put the board to sleep. Controls adjusts real
+Showcase actions and sample device states are labeled Demo; they do not
+connect devices or sync anything. Controls adjusts real
 brightness and volume, and battery readings refresh once per minute. Home's
 hero uses a battery ring with the live percentage, current local time, and
 date/weekday. The clock accepts the computer timestamp from the BLE payload,
@@ -47,7 +46,7 @@ also polls `ntp1.aliyun.com` when saved Wi-Fi credentials are available, and
 continues counting from the last saved value offline.
 
 Settings controls which content pages appear. Press OK or long OK to enter its
-controls, use UP/DOWN to select among ten checkboxes (four rows per view), and
+controls, use UP/DOWN to select among seven checkboxes (four rows per view), and
 press OK to show or hide the selected page. Home is always on and Settings
 cannot be hidden. Long OK returns to browsing.
 Changes apply immediately; wait for "Saved on device" before powering off.
@@ -57,9 +56,9 @@ errors are shown as "Not saved (session only)" without discarding live changes.
 ## What it demonstrates
 
 - Glass surfaces that retain wallpaper detail instead of becoming opaque cards.
-- Deterministic non-linear motion for focus, segmented controls, toggles,
-  sliders, navigation, and menu morphing.
-- Eight mobile-style scenes rather than a conventional embedded dashboard.
+- Deterministic non-linear motion for focus, sliders, progress, and page
+  navigation.
+- Five mobile-style scenes rather than a conventional embedded dashboard.
 - Standard, High Contrast, Reduce Glass, and Reduce Motion profiles.
 - An allocation-conscious RGB565 compositor and bounded dirty-region planner.
 - Low-memory screenshots over USB Serial/JTAG for repeatable visual review.

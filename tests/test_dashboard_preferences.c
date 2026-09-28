@@ -60,7 +60,9 @@ int main(int argc, char **argv)
     }
     if (argc > 1 && strcmp(argv[1], "restart") == 0) {
         exists = true;
-        disk = 0; // An intentional all-hidden mask must survive restart.
+        // An intentional all-hidden mask must survive restart, and the bit an
+        // older firmware kept for a now-retired page must not revive it.
+        disk = 1u << PAGE_RETIRED_FOCUS;
         dashboard_preferences_init();
         assert(dashboard_preferences_pages() == UI_DASHBOARD_ALWAYS_VISIBLE_MASK);
         assert(ui_dashboard_page_first(dashboard_preferences_pages()) == SHOWCASE_NAVIGATION);

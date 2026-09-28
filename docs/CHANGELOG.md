@@ -6,6 +6,13 @@
 
 ## Unreleased
 
+- Removed the Focus, Moments, and Player pages. The dashboard now shows Home,
+  Controls, Devices, Activity, Appearance, Kaboo, Claude, and Settings, and
+  Settings lists seven pages. The removed pages keep their ids in the saved
+  page-visibility mask, so no other page's setting shifts, and bits an earlier
+  firmware saved for them are ignored. Code only they used went with them: the
+  Quick Actions morph menu, the segmented control, and the Moments buttons.
+
 - Filled the space Home's dock left behind. The clock card now reaches down to
   where the dock ended, 8 px above the footer, and shows the time in the large
   44 px digits used by Kaboo, with the date under it and the battery ring,

@@ -6,6 +6,12 @@
 
 ## Unreleased
 
+- 移除 Focus、Moments、Player 三页。看板现在包含 Home、Controls、Devices、Activity、
+  Appearance、Kaboo、Claude 与 Settings，Settings 列出七个页面。被移除的页面在已保存
+  的页面可见性位掩码中保留原 ID，其他页面的设置不会错位，旧固件为它们保存的位会被
+  忽略。只属于这三页的代码一并删除：Quick Actions 形变菜单、分段选择器与 Moments
+  按钮。
+
 - 填补 Home 移除 dock 后留下的空白。时钟卡向下延伸到原 dock 的底边（距 footer
   8 px），用 Kaboo 同款 44 px 大号数字显示时间，日期在其下方，电量圆环缩为 48 px
   并在右侧垂直居中。即使是最宽的时间 00:00，与圆环之间也保留 8 px 间隙。

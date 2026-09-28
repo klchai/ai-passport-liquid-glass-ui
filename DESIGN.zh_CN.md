@@ -8,7 +8,7 @@
 
 本文定义硬件原生 Glass System 的长期视觉与交互边界。当前 Foundation 已实现
 Tokens、四种无障碍 Profile、确定性 Motion、三键 Focus、核心内容与控制组件、动态
-显示质量、八个展示场景与两个实时用量页面。组件真机成本在当前固件
+显示质量、五个展示场景与两个实时用量页面。组件真机成本在当前固件
 刷入并完成物理测量前保持待测状态。
 
 ## 方向契约
@@ -98,7 +98,7 @@ Focus 是沿连续轨迹移动的对象，不是每个 Row 各自凭空出现和
 状态。无障碍 Profile 是同一组件的 Variant，不是互不关联的复制品。
 
 首批可复用 C API 包含 Content Panel、Glass Platter、Focus Lens、Row、Toggle 和
-Slider。Morph Menu 和 Device Status 已在 Showcase 中验证，但在抽取公共 API
+Slider。Device Status 已在 Showcase 中验证，但在抽取公共 API
 前不能宣称为可复用组件。完整且诚实的清单见
 `design/liquid-glass/components.json`。
 
@@ -107,36 +107,35 @@ Slider。Morph Menu 和 Device Status 已在 Showcase 中验证，但在抽取�
 
 ## Patterns 与 Showcase
 
-真机 Showcase 是八场景交互与动效作品集。它以可信的手机式场景承载组件，不再把
+真机 Showcase 是五场景交互与动效作品集。它以可信的手机式场景承载组件，不再把
 实现分类直接展示给观众。页面顺序与稳定的内部组件标识刻意解耦：
 
-1. Player：通栏媒体内容、播放状态，以及从原控件展开的 Quick Actions Morph
-2. Home：问候语卡片，以及带电量圆环和时间/日期的卡片
-3. Focus：分段模式、Toggle、选择项，以及唯一且连续移动的 Focus Lens
-4. Controls：带动画的玻璃 Slider Knob、Stepper 和可调 Progress
-5. Devices：列表遍历、持续焦点与 Row 激活反馈
-6. Activity：统一的离线同步任务，覆盖 Progress、Paused 与 Error 状态
-7. Moments：带摄影内容语义的主操作、玻璃操作与危险操作
-8. Appearance：可选择 Standard、High Contrast、Reduced Transparency 与 Reduced
+1. Home：问候语卡片，以及带电量圆环和时间/日期的卡片
+2. Controls：带动画的玻璃 Slider Knob、Stepper 和可调 Progress
+3. Devices：列表遍历、持续焦点与 Row 激活反馈
+4. Activity：统一的离线同步任务，覆盖 Progress、Paused 与 Error 状态
+5. Appearance：可选择 Standard、High Contrast、Reduced Transparency 与 Reduced
    Motion 系统 Profile
 
-Kaboo 与 Claude 位于 Appearance 之后，分别为第九、第十页，Settings 为第十一页。
+Kaboo 与 Claude 位于 Appearance 之后，分别为第六、第七页，Settings 为第八页。
 Kaboo 标明 token 计数与模型，Claude 明确百分比是已用配额。两页均显示采样新鲜度并弱化旧值。
 示例内容与操作明确标记为演示。Controls 显示真实亮度与音量，以及音频不可用状态，
 电量采样每分钟更新一次。Home 的电量圆环与时间/日期卡片来自设备时钟；电脑 BLE
 payload 和 `ntp1.aliyun.com` 提供校时。
 
-快速操作 Focus、Toggle、Slider 和 Segmented 时，从视觉对象当前采样位置重新
-定向，不启动互相竞争的动画。High Contrast 与 Reduced Transparency 除了应用于
-共享控件，也覆盖内容画布、Player、Home 与实时数据页面。
+快速操作 Focus 与 Slider 时，从视觉对象当前采样位置重新定向，不启动互相竞争的
+动画。High Contrast 与 Reduced Transparency 除了应用于共享控件，也覆盖内容画布、
+Home 与实时数据页面。
 
 
-Home 是固定默认首页并始终显示。Settings 是第十一页，也始终保留。它按展示顺序
-列出十个内容页，每屏四个复选框。
+Home 是固定默认首页并始终显示。Settings 是第八页，也始终保留。它按展示顺序
+列出七个内容页，每屏四个复选框。
 页内 UP/DOWN 移动选项，OK 切换可见性。启动、翻页和底栏邻居页名均遵守可见集合，
 隐藏可选页面后仍可访问 Home 与 Settings，Home 不能切换关闭。设置以稳定页面 ID 的位掩码保存到应用 NVS 的 `dashboard`
-命名空间、`pages_v1` 键，读写不涉及身份区或 Recovery。UI 只发布原子快照，应用
-任务每秒合并保存一次；只有保存成功才显示已保存，失败保留会话设置并提示。
+命名空间、`pages_v1` 键，读写不涉及身份区或 Recovery。已移除的 Focus、Moments、
+Player 页保留原页面 ID，其他页面的位不会移动；这三页已存的位会被忽略。UI 只发布
+原子快照，应用任务每秒合并保存一次；只有保存成功才显示已保存，失败保留会话设置
+并提示。
 
 ## Runtime 与性能
 
