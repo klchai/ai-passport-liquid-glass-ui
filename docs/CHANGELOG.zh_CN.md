@@ -6,6 +6,9 @@
 
 ## Unreleased
 
+- 对齐 Moments 的按钮与 Night Drive 卡片。Open moment、Share、Remove 三个按钮
+  与卡片同宽，不再在两侧各缩进 6 px；焦点透镜随之加宽，仍保持 2 px 光晕。
+
 - 移除了与其他页面重复的功能。Home 去掉 Play、Link 两个标签以及切换它们的 dock：
   Play 显示的是与 Player 相同的演示曲目；Link 不论实际是否连接都显示
   "Passport Linked"，而 header 的链路点已经在每一页显示真实状态。Home 现在只有一张

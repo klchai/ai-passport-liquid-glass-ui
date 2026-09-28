@@ -6,6 +6,10 @@
 
 ## Unreleased
 
+- Aligned the Moments buttons with the Night Drive card. Open moment, Share,
+  and Remove now span the card's full width instead of stopping 6 px short of
+  each edge, and the focus lens widens with them to keep its 2 px halo.
+
 - Removed features that repeated other pages. Home drops its Play and Link
   tabs and the dock that switched between them: Play showed the same demo
   track as Player, and Link claimed "Passport Linked" whatever the real

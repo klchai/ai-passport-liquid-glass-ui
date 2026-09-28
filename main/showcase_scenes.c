@@ -899,26 +899,28 @@ static ui_glass_component_t showcase_button_create(
     const ui_glass_theme_t *t)
 {
     ui_glass_component_t component = { 0 };
+    // The capsule spans the whole row, matching the Moments art card above
+    // (stage x 6..201), so the card and the buttons share one column.
     component.root = plain_object(parent, 6, y, 196, 40);
     lv_obj_t *button;
     uint32_t text_color = t->text;
     if (style == 0) {
-        button = solid_object(component.root, 6, 1, 184, 38,
+        button = solid_object(component.root, 0, 1, 196, 38,
                               UI_GLASS_RADIUS_CONTROL,
                               t->accent, LV_OPA_COVER);
         text_color = t->content_surface;
     } else if (style == 1) {
         button = ui_glass_surface_create(
-            component.root, 6, 1, 184, 38, UI_GLASS_RADIUS_CONTROL,
+            component.root, 0, 1, 196, 38, UI_GLASS_RADIUS_CONTROL,
             t->control_tint,
             t->control_opacity, t->control_material);
     } else if (style == 2) {
-        button = solid_object(component.root, 6, 1, 184, 38,
+        button = solid_object(component.root, 0, 1, 196, 38,
                               UI_GLASS_RADIUS_CONTROL,
                               t->danger, LV_OPA_30);
         text_color = t->danger;
     } else {
-        button = solid_object(component.root, 6, 1, 184, 38,
+        button = solid_object(component.root, 0, 1, 196, 38,
                               UI_GLASS_RADIUS_CONTROL,
                               t->text_muted, LV_OPA_20);
         text_color = t->text_muted;
@@ -1181,8 +1183,8 @@ static void build_buttons(lv_obj_t *root)
     lv_obj_set_height(s_moments_result_label, lv_font_montserrat_14.line_height);
 
     // 透镜与每行 root 同高（h40）、行距 41：面在 root 内 y+1..y+38，透镜
-    // y..y+39，上下各 1px halo，三行严格对称。透镜仍是 x10/w188，比 184px
-    // 胶囊左右各多 2px halo；更宽的 196px 透镜会露出嵌套药丸。
+    // y..y+39，上下各 1px halo，三行严格对称。胶囊与上方 art 卡同宽（stage
+    // x6..201，196px），透镜 x4/w200 左右各多 2px halo；再宽会露出嵌套药丸。
     // 关键是纵向不能与 Share（第 1 行，唯一玻璃面）共扫描行。Share 面在
     // stage 行 121..158，三组光学环占 121/122/123 与 156/157/158：
     //  - 透镜停第 0 行（79..118）底三环 116/117/118，与 Share 顶环空
@@ -1194,7 +1196,7 @@ static void build_buttons(lv_obj_t *root)
     // moments_focus_edge_hook 关掉 Share 自己的边，不靠几何避让。
     // 边界：顶外环行 79 离 art 卡底行 75 空 3 行；底外环行 200 离 204 高的
     // stage 底边空 3 行，第 2 行的面（底 199）与透镜都不溢出。
-    lv_obj_t *lens = ui_glass_focus_lens_create(stage, 10, 79, 188, 40, t);
+    lv_obj_t *lens = ui_glass_focus_lens_create(stage, 4, 79, 200, 40, t);
     static const char *const labels[] = {
         "Open moment", "Share", "Remove", NULL,
     };
