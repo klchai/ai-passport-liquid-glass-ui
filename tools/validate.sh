@@ -48,8 +48,36 @@ run_static_checks() {
         main/ui_glass_optics.c \
         -o "${test_dir}/test_ui_glass_foundation"
     "${test_dir}/test_ui_glass_foundation"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_usage_model.c main/usage_model.c \
+        -o "${test_dir}/test_usage_model"
+    "${test_dir}/test_usage_model"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_ui_dashboard_cards.c main/ui_dashboard_cards.c \
+        -o "${test_dir}/test_ui_dashboard_cards"
+    "${test_dir}/test_ui_dashboard_cards"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/test_ui_dashboard_pages.c main/ui_dashboard_pages.c \
+        -o "${test_dir}/test_ui_dashboard_pages"
+    "${test_dir}/test_ui_dashboard_pages"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain -Itests/nvs_stub \
+        tests/test_dashboard_preferences.c main/dashboard_preferences.c \
+        main/ui_dashboard_pages.c -o "${test_dir}/test_dashboard_preferences"
+    "${test_dir}/test_dashboard_preferences"
+    "${test_dir}/test_dashboard_preferences" restart
+    "${test_dir}/test_dashboard_preferences" unavailable
+    # The committed digit font must match what the generator produces from the
+    # checked-in TTF and SYMBOLS; a stale copy would silently draw empty boxes
+    # for any glyph added to SYMBOLS but not regenerated.
+    PYTHONDONTWRITEBYTECODE=1 python3 tools/gen_digit_font.py --check
+    # The rim renderer borrows wallpaper color from a LUT in ui_glass_optics.c;
+    # a rebuilt wallpaper without refreshed samples would tint every glass rim
+    # with the old image's colors.
+    PYTHONDONTWRITEBYTECODE=1 python3 tools/build_liquid_glass_wallpaper.py --check-samples
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_build_liquid_glass_wallpaper.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_capture_screen.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_verify_firmware.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/test_usage_bridge.py
     rm -rf "${test_dir}"
     echo "Host tests: PASS"
 }

@@ -42,3 +42,11 @@ uint32_t ui_glass_background_at_y(int16_t y);
 // Maps an animation progress to a horizontal coordinate. Values outside
 // 0..1024 intentionally place the glint beyond the visible edge.
 int16_t ui_glass_glint_center(int32_t progress, int16_t left, int16_t right);
+
+// Returns the corner radius LVGL draws for a width x height box: it clamps
+// every fill, border and mask to half the short side, so LV_RADIUS_CIRCLE
+// (0x7FFF) yields a circle or capsule whose rings must follow that outline.
+// Specular, refraction and glint segments are straight and may only sit on the
+// run x1 + radius .. x2 - radius, which a circle lacks. Sizes <= 0 return 0.
+int16_t ui_glass_effective_radius(int16_t radius, int16_t width,
+                                  int16_t height);

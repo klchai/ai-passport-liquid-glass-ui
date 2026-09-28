@@ -71,8 +71,133 @@ static bool rect_contains(const liquid_glass_dirty_rect_t *rect,
            y >= rect->y1 && y <= rect->y2;
 }
 
+static bool parse_blob(const uint8_t *blob, size_t size,
+                       liquid_glass_indexed_image_t *image,
+                       uint16_t palette[LIQUID_GLASS_PALETTE_SIZE])
+{
+    return liquid_glass_indexed_image_parse(blob, size, image, palette);
+}
+
+static void test_indexed_image(void)
+{
+    enum { WIDTH = 3, HEIGHT = 2 };
+    uint8_t blob[LIQUID_GLASS_INDEXED_HEADER_BYTES +
+                 LIQUID_GLASS_INDEXED_PALETTE_BYTES + WIDTH * HEIGHT] = { 0 };
+    memcpy(blob, "LGP8", 4);
+    blob[4] = WIDTH;
+    blob[6] = HEIGHT;
+    blob[8] = 3;
+    const uint16_t colors[3] = { 0x0000, 0xF800, 0x07FF };
+    for (int index = 0; index < 3; ++index) {
+        blob[LIQUID_GLASS_INDEXED_HEADER_BYTES + index * 2] =
+            (uint8_t)(colors[index] & 0xFFu);
+        blob[LIQUID_GLASS_INDEXED_HEADER_BYTES + index * 2 + 1] =
+            (uint8_t)(colors[index] >> 8);
+    }
+    const uint8_t pixels[WIDTH * HEIGHT] = { 0, 1, 2, 2, 1, 0 };
+    memcpy(blob + LIQUID_GLASS_INDEXED_HEADER_BYTES +
+               LIQUID_GLASS_INDEXED_PALETTE_BYTES,
+           pixels, sizeof(pixels));
+
+    uint16_t palette[LIQUID_GLASS_PALETTE_SIZE];
+    memset(palette, 0xAB, sizeof(palette));
+    liquid_glass_indexed_image_t image;
+    assert(parse_blob(blob, sizeof(blob), &image, palette));
+    assert(image.width == WIDTH && image.height == HEIGHT);
+    assert(image.colors == 3);
+    assert(palette[1] == 0xF800 && palette[2] == 0x07FF);
+    assert(palette[3] == 0 && palette[LIQUID_GLASS_PALETTE_SIZE - 1] == 0);
+
+    uint16_t row[WIDTH];
+    liquid_glass_indexed_row(image.indices + WIDTH, palette, 0, WIDTH - 1,
+                             row);
+    assert(row[0] == 0x07FF && row[1] == 0xF800 && row[2] == 0x0000);
+    liquid_glass_indexed_row(image.indices, palette, 1, 2, row);
+    assert(row[0] == 0xF800 && row[1] == 0x07FF);
+
+    // Every rejection leaves the caller's state untouched.
+    liquid_glass_indexed_image_t untouched = image;
+    assert(!parse_blob(blob, sizeof(blob) - 1, &untouched, palette));
+    assert(!parse_blob(blob, sizeof(blob) + 1, &untouched, palette));
+    blob[0] = 'X';
+    assert(!parse_blob(blob, sizeof(blob), &untouched, palette));
+    blob[0] = 'L';
+    blob[8] = 0;
+    assert(!parse_blob(blob, sizeof(blob), &untouched, palette));
+    blob[8] = 1;
+    blob[9] = 1;  // 257 colors
+    assert(!parse_blob(blob, sizeof(blob), &untouched, palette));
+    blob[8] = 3;
+    blob[9] = 0;
+    blob[4] = 0;  // zero width
+    assert(!parse_blob(blob, sizeof(blob), &untouched, palette));
+    blob[4] = WIDTH;
+    assert(untouched.indices == image.indices);
+    assert(parse_blob(blob, sizeof(blob), &image, palette));
+
+    // Long rows exercise the unrolled path, including clipped starts.
+    uint8_t long_row[37];
+    uint16_t decoded[37];
+    for (int x = 0; x < 37; ++x) long_row[x] = (uint8_t)(x % 3);
+    liquid_glass_indexed_row(long_row, palette, 5, 36, decoded);
+    for (int x = 5; x <= 36; ++x) {
+        assert(decoded[x - 5] == colors[x % 3]);
+    }
+}
+
+static void test_fill_mix_matches_lvgl(void)
+{
+    // Theme content surfaces and extremes, over every RGB565 background and
+    // every canvas opacity the dashboard uses plus the LVGL thresholds.
+    const uint16_t foregrounds[] = {
+        liquid_glass_rgb888_to_rgb565(0x071421u),
+        liquid_glass_rgb888_to_rgb565(0x050C13u),
+        liquid_glass_rgb888_to_rgb565(0x0A1722u),
+        0x0000, 0xFFFF, 0xF81F,
+    };
+    const uint8_t opacities[] = {
+        0, 1, 2, 3, 64, 96, 160, 224, 252, 253, 254, 255,
+    };
+    for (size_t f = 0; f < sizeof(foregrounds) / sizeof(foregrounds[0]); ++f) {
+        for (size_t o = 0; o < sizeof(opacities); ++o) {
+            uint8_t opa = opacities[o];
+            for (uint32_t background = 0; background <= UINT16_MAX;
+                 ++background) {
+                uint16_t expected =
+                    opa <= LIQUID_GLASS_FILL_OPA_MIN ? (uint16_t)background
+                    : opa >= LIQUID_GLASS_FILL_OPA_MAX ? foregrounds[f]
+                    : lvgl_reference_mix(foregrounds[f],
+                                         (uint16_t)background, opa);
+                assert(liquid_glass_rgb565_fill_mix(
+                           foregrounds[f], (uint16_t)background, opa) ==
+                       expected);
+            }
+        }
+    }
+
+    uint16_t palette[LIQUID_GLASS_PALETTE_SIZE];
+    uint16_t tinted[LIQUID_GLASS_PALETTE_SIZE];
+    for (int index = 0; index < LIQUID_GLASS_PALETTE_SIZE; ++index) {
+        palette[index] = (uint16_t)(index * 257u);
+    }
+    liquid_glass_palette_tint(palette, foregrounds[0], 96, tinted);
+    for (int index = 0; index < LIQUID_GLASS_PALETTE_SIZE; ++index) {
+        assert(tinted[index] == liquid_glass_rgb565_fill_mix(
+                   foregrounds[0], palette[index], 96));
+    }
+
+    uint16_t span[LIQUID_GLASS_PALETTE_SIZE];
+    memcpy(span, palette, sizeof(span));
+    liquid_glass_fill_mix_span(span, LIQUID_GLASS_PALETTE_SIZE,
+                               foregrounds[0], 96);
+    assert(memcmp(span, tinted, sizeof(span)) == 0);
+}
+
 int main(void)
 {
+    test_indexed_image();
+    test_fill_mix_matches_lvgl();
+
     liquid_glass_frame_t frames[LIQUID_GLASS_WINDOW_COUNT];
     for (uint8_t card = 0; card < LIQUID_GLASS_WINDOW_COUNT; ++card) {
         frames[card] = liquid_glass_frame_for_rank(card);
@@ -123,6 +248,13 @@ int main(void)
         assert(output[x] == liquid_glass_rgb565_lut_apply(
             &lut, wallpaper[x], naive_mask(frames, x, 100)));
     }
+
+    // The in-place variant used after an indexed row decode matches.
+    uint16_t in_place[LIQUID_GLASS_COMPOSITOR_WIDTH];
+    memcpy(in_place, wallpaper + 17, sizeof(uint16_t) * 200);
+    liquid_glass_apply_coverage_row(&lut, frames, 100, 17, 216, in_place);
+    liquid_glass_composite_row(&lut, frames, wallpaper, 100, 17, 216, output);
+    assert(memcmp(in_place, output, sizeof(uint16_t) * 200) == 0);
 
     liquid_glass_frame_t edge_frames[LIQUID_GLASS_WINDOW_COUNT] = { 0 };
     edge_frames[0] = (liquid_glass_frame_t) {

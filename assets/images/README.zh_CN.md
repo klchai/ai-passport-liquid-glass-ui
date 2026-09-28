@@ -14,9 +14,22 @@
 
 ## Liquid Glass 壁纸
 
-- `liquid_glass_wallpaper_source.jpg`：720 × 960 的源裁切图，用于评审和后续重新处理。
-- `liquid_glass_wallpaper.rgb565`：240 × 320 小端 RGB565 固件资源；通过 `python tools/build_liquid_glass_wallpaper.py` 生成。
-- 集成方式：由 `main/CMakeLists.txt` 嵌入，`main/ui_glass.c` 直接从 Flash 渲染，不分配全屏解码缓冲区。
-- 优化方式：静态蓝色调与标题可读性渐变已预烘焙进 RGB565 资源，重绘时无需再对两层全屏透明对象做 alpha 合成。
-- 来源：[Unsplash glass wallpaper 搜索页](https://unsplash.com/s/photos/glass-wallpaper)，图片资源 `photo-1706101299176-292d8c5e470e`。
-- 许可：[Unsplash License](https://unsplash.com/license)。
+- `liquid_glass_wallpaper.lgp8`：240 × 320 索引色（"LGP8"）固件资源，画面是石墨灰底上的
+  丝绸褶线。文件由 12 字节文件头、256 项小端 RGB565 调色板和每像素一个调色板索引组成，
+  共 77,324 字节。抖动后的画面只用到 137 种颜色，因此这种编码是无损的；字节布局见
+  `main/liquid_glass_compositor_core.h`。通过 `python tools/build_liquid_glass_wallpaper.py`
+  生成（需要 `ffmpeg`）。`--from-rgb565 <raster>` 可把现有的 240 × 320 小端 RGB565
+  栅格重新编码，不需要 `ffmpeg`。颜色超过 256 种的栅格会被直接拒绝，而不是再量化一次。
+- 来源：该脚本中定义的原创程序化画面，以 720 × 960、16 位精度渲染，因此脚本本身就是
+  可编辑源文件。如需改用其他图片，传入 `--source <image>`。
+- 集成方式：由 `main/CMakeLists.txt` 嵌入。`main/ui_glass_compositor.c` 启动时校验一次，
+  把 512 字节调色板复制到 RAM，再从 Flash 逐行解码、直接写入 LVGL 绘制缓冲区，不分配
+  全屏解码缓冲区。
+- 优化方式：静态中性色调与标题可读性渐变已预烘焙进资源，重绘时无需再对两层全屏透明
+  对象做 alpha 合成。4 × 4 有序抖动避免深色渐变在 RGB565 下出现色带。每像素 1 字节，
+  从 Flash 读取的数据量是原 RGB565 栅格的一半；页面内容画布下方的压暗效果由合成器用
+  预先着色的调色板副本解码得到。
+- 光学边取色：脚本会打印 `main/ui_glass_optics.c` 所需的 `WALLPAPER_CENTER_SAMPLES`
+  数据行，每次更换资源都要同步更新；`tools/validate.sh` 会运行 `--check-samples`，
+  两者不一致时直接失败。
+- 许可：原创内容，适用仓库[许可证](../../LICENSE)。

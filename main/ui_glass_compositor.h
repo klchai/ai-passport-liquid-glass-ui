@@ -4,14 +4,16 @@
 #include "ui_glass_optics.h"
 #include "lvgl.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef struct ui_glass_compositor ui_glass_compositor_t;
 
 // Creates one covering RGB565 renderer that fuses the wallpaper and
 // overlapping deck fills straight into LVGL's active draw buffer. Card
-// content remains as ordinary objects above it; deck fills and static optical
-// edges share the same direct RGB565 pass.
+// content remains as ordinary objects above it; deck fills, static optical
+// edges and flat content canvases share the same direct RGB565 pass. The
+// wallpaper is decoded from the embedded indexed (LGP8) asset.
 ui_glass_compositor_t *ui_glass_compositor_create(lv_obj_t *parent,
                                                    uint32_t tint,
                                                    ui_glass_material_t material);
@@ -62,3 +64,19 @@ void ui_glass_compositor_set_material(
     uint32_t tint,
     ui_glass_material_t material,
     const uint8_t opacity[LIQUID_GLASS_WINDOW_COUNT]);
+
+// Draws `canvas` as a flat `color` fill at `opa` inside the wallpaper pass,
+// pixel-identical to an LVGL background fill with radius 0, so the canvas
+// object itself stays transparent. Its visible area (coordinates clipped by
+// its ancestors) is read at draw time, so it follows moves such as page
+// slides. The canvas must be the lowest LVGL drawing in its area: nothing
+// may be drawn between the compositor and it. Neither it nor an ancestor
+// may be faded (opa style) or transformed. Overlapping canvases blend in
+// registration order. Updating color or opacity invalidates the canvas;
+// opa <= 2 releases it. Deleting the canvas releases it automatically.
+// Returns false when no slot is free; the caller must then draw the canvas
+// itself.
+bool ui_glass_compositor_set_canvas(ui_glass_compositor_t *compositor,
+                                    lv_obj_t *canvas,
+                                    uint32_t color,
+                                    lv_opa_t opa);

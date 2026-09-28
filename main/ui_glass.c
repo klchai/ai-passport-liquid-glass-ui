@@ -1,5 +1,7 @@
 #include "ui_glass.h"
 
+#include <string.h>
+
 typedef struct {
     int16_t radius;
     int16_t glint_progress;
@@ -50,9 +52,9 @@ static bool glint_area(const lv_obj_t *surface,
 
     lv_area_t bounds;
     lv_obj_get_coords(surface, &bounds);
-    int16_t radius = state->radius;
     int16_t width = (int16_t)lv_area_get_width(&bounds);
-    if (radius > width / 2) radius = width / 2;
+    int16_t height = (int16_t)lv_area_get_height(&bounds);
+    int16_t radius = ui_glass_effective_radius(state->radius, width, height);
     int16_t safe_left = (int16_t)(bounds.x1 + radius);
     int16_t safe_right = (int16_t)(bounds.x2 - radius);
     int16_t safe_width = (int16_t)(safe_right - safe_left);
@@ -99,11 +101,14 @@ static void draw_segment(lv_layer_t *layer, int16_t x1, int16_t x2, int16_t y,
     lv_draw_line(layer, &line);
 }
 
+static bool s_optics_suppressed = false;
+
 static void surface_draw(lv_event_t *event)
 {
     lv_obj_t *surface = lv_event_get_target_obj(event);
     ui_glass_surface_state_t *state = lv_event_get_user_data(event);
     if (!state) return;
+    if (s_optics_suppressed) return;
 
     lv_layer_t *layer = lv_event_get_layer(event);
     lv_area_t bounds;
@@ -112,8 +117,8 @@ static void surface_draw(lv_event_t *event)
                      lv_obj_get_style_transform_width(surface, LV_PART_MAIN),
                      lv_obj_get_style_transform_height(surface, LV_PART_MAIN));
     int16_t width = (int16_t)lv_area_get_width(&bounds);
-    int16_t radius = state->radius;
-    if (radius > width / 2) radius = width / 2;
+    int16_t height = (int16_t)lv_area_get_height(&bounds);
+    int16_t radius = ui_glass_effective_radius(state->radius, width, height);
 
     ui_glass_optics_t optics = ui_glass_optics_for_material(state->material);
     uint8_t strength = state->edge_strength;
@@ -122,7 +127,6 @@ static void surface_draw(lv_event_t *event)
     int16_t safe_left = (int16_t)(bounds.x1 + radius);
     int16_t safe_right = (int16_t)(bounds.x2 - radius);
     int16_t safe_width = safe_right - safe_left;
-    if (safe_width <= 0) return;
 
     {
         uint32_t top_sample = ui_glass_background_at_y(
@@ -149,6 +153,11 @@ static void surface_draw(lv_event_t *event)
             border.side = LV_BORDER_SIDE_FULL;
             lv_draw_border(layer, &border, &ring_bounds);
         }
+
+        // The rings follow any outline, but the specular, refraction and
+        // glint segments are straight lines that need a straight top/bottom
+        // run. A circle has none, so it keeps only its rings.
+        if (safe_width <= 0) return;
 
         // Highlights occupy different parts of the perimeter, avoiding the
         // doubled full-width white rules that made the earlier version look
@@ -242,6 +251,16 @@ void ui_glass_surface_set_tint(lv_obj_t *surface, uint32_t tint,
 {
     if (!surface) return;
     ui_glass_surface_state_t *state = lv_obj_get_user_data(surface);
+    // The shell re-applies the footer tint on every refresh. Compare the
+    // styles that are actually drawn (the Player morph writes bg_color and
+    // bg_opa directly) plus the rim's tint, and skip the full-surface
+    // invalidation when nothing changed.
+    if (lv_color_eq(lv_obj_get_style_bg_color(surface, LV_PART_MAIN),
+                    lv_color_hex(tint)) &&
+        lv_obj_get_style_bg_opa(surface, LV_PART_MAIN) == opacity &&
+        (!state || state->tint == tint)) {
+        return;
+    }
     if (state) state->tint = tint;
     lv_obj_set_style_bg_color(surface, lv_color_hex(tint), 0);
     lv_obj_set_style_bg_opa(surface, opacity, 0);
@@ -268,6 +287,16 @@ void ui_glass_surface_set_fused_edge(lv_obj_t *surface, bool fused)
     if (!state || state->fused_edge == fused) return;
     state->fused_edge = fused;
     invalidate_perimeter(surface);
+}
+
+void ui_glass_set_optics_suppressed(bool suppressed)
+{
+    s_optics_suppressed = suppressed;
+}
+
+bool ui_glass_is_optics_suppressed(void)
+{
+    return s_optics_suppressed;
 }
 
 void ui_glass_surface_set_glint(lv_obj_t *surface, int32_t progress)
@@ -302,4 +331,76 @@ lv_obj_t *ui_glass_label(lv_obj_t *parent, const char *text,
     lv_obj_set_style_text_font(label, font, 0);
     lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
     return label;
+}
+
+bool ui_glass_set_bg_color_if_changed(lv_obj_t *object, uint32_t color)
+{
+    if (!object) return false;
+    lv_color_t value = lv_color_hex(color);
+    if (lv_color_eq(lv_obj_get_style_bg_color(object, LV_PART_MAIN), value)) {
+        return false;
+    }
+    lv_obj_set_style_bg_color(object, value, 0);
+    return true;
+}
+
+bool ui_glass_set_bg_opa_if_changed(lv_obj_t *object, lv_opa_t opa)
+{
+    if (!object || lv_obj_get_style_bg_opa(object, LV_PART_MAIN) == opa) {
+        return false;
+    }
+    lv_obj_set_style_bg_opa(object, opa, 0);
+    return true;
+}
+
+bool ui_glass_set_opa_if_changed(lv_obj_t *object, lv_opa_t opa)
+{
+    if (!object || lv_obj_get_style_opa(object, LV_PART_MAIN) == opa) {
+        return false;
+    }
+    lv_obj_set_style_opa(object, opa, 0);
+    return true;
+}
+
+bool ui_glass_set_text_color_if_changed(lv_obj_t *object, uint32_t color)
+{
+    if (!object) return false;
+    lv_color_t value = lv_color_hex(color);
+    if (lv_color_eq(lv_obj_get_style_text_color(object, LV_PART_MAIN),
+                    value)) {
+        return false;
+    }
+    lv_obj_set_style_text_color(object, value, 0);
+    return true;
+}
+
+bool ui_glass_set_width_if_changed(lv_obj_t *object, int32_t width)
+{
+    if (!object || lv_obj_get_style_width(object, LV_PART_MAIN) == width) {
+        return false;
+    }
+    lv_obj_set_width(object, width);
+    return true;
+}
+
+bool ui_glass_set_label_text_if_changed(lv_obj_t *label, const char *text)
+{
+    if (!label || !text) return false;
+    const char *current = lv_label_get_text(label);
+    if (current && strcmp(current, text) == 0) return false;
+    lv_label_set_text(label, text);
+    return true;
+}
+
+bool ui_glass_set_hidden_if_changed(lv_obj_t *object, bool hidden)
+{
+    if (!object || lv_obj_has_flag(object, LV_OBJ_FLAG_HIDDEN) == hidden) {
+        return false;
+    }
+    if (hidden) {
+        lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_remove_flag(object, LV_OBJ_FLAG_HIDDEN);
+    }
+    return true;
 }

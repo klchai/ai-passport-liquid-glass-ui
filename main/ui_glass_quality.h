@@ -12,6 +12,8 @@ typedef enum {
 
 typedef struct {
     const char *name;
+    // Paces both LVGL's display refresh and its animation timer, so it is
+    // the real motion cadence: about 60, 40 and 30 frames per second.
     uint16_t refresh_period_ms;
     uint8_t animated_glass_limit;
     uint8_t edge_strength_percent;

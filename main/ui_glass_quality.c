@@ -3,14 +3,14 @@
 static const ui_glass_quality_profile_t PROFILES[UI_GLASS_QUALITY_COUNT] = {
     [UI_GLASS_QUALITY_FULL] = {
         .name = "Full",
-        .refresh_period_ms = 10,
+        .refresh_period_ms = 16,
         .animated_glass_limit = 6,
         .edge_strength_percent = 100,
         .glint_enabled = true,
     },
     [UI_GLASS_QUALITY_BALANCED] = {
         .name = "Balanced",
-        .refresh_period_ms = 16,
+        .refresh_period_ms = 25,
         .animated_glass_limit = 3,
         .edge_strength_percent = 86,
         .glint_enabled = true,

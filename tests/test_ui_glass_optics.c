@@ -61,5 +61,38 @@ int main(void)
     assert(ui_glass_glint_center(UI_GLASS_ANIM_PROGRESS_MAX, 10, 210) == 210);
     assert(ui_glass_glint_center(-256, 10, 210) < 10);
     assert(ui_glass_glint_center(1280, 10, 210) > 210);
+
+    // The rim radius follows LVGL's clamp to half the short side. 0x7FFF is
+    // LV_RADIUS_CIRCLE, which the surface state stores as an int16_t.
+    const int16_t radius_circle = 0x7FFF;
+    assert(ui_glass_effective_radius(18, 36, 36) == 18);
+    assert(ui_glass_effective_radius(radius_circle, 20, 20) == 10);
+    assert(ui_glass_effective_radius(radius_circle, 14, 14) == 7);
+    assert(ui_glass_effective_radius(radius_circle, 82, 28) == 14);
+    assert(ui_glass_effective_radius(radius_circle, 28, 82) == 14);
+    assert(ui_glass_effective_radius(22, 212, 36) == 18);
+    assert(ui_glass_effective_radius(22, 156, 34) == 17);
+    assert(ui_glass_effective_radius(22, 36, 212) == 18);
+    assert(ui_glass_effective_radius(14, 188, 40) == 14);
+    assert(ui_glass_effective_radius(14, 30, 30) == 14);
+    assert(ui_glass_effective_radius(18, 196, 164) == 18);
+    assert(ui_glass_effective_radius(radius_circle, 32767, 32767) == 16383);
+    assert(ui_glass_effective_radius(0, 40, 40) == 0);
+    assert(ui_glass_effective_radius(-4, 40, 40) == 0);
+    assert(ui_glass_effective_radius(radius_circle, 1, 1) == 0);
+    assert(ui_glass_effective_radius(radius_circle, 0, 28) == 0);
+    assert(ui_glass_effective_radius(radius_circle, 82, 0) == 0);
+    assert(ui_glass_effective_radius(18, -36, 36) == 0);
+    assert(ui_glass_effective_radius(radius_circle, -36, -36) == 0);
+
+    // Speculars and the glint sit on the straight run x1 + radius ..
+    // x2 - radius, whose length is width - 1 - 2 * radius. Circles of every
+    // size, odd ones included, have none; a capsule keeps a flat top.
+    for (int16_t size = 1; size <= 64; ++size) {
+        int16_t radius = ui_glass_effective_radius(radius_circle, size, size);
+        assert(radius == size / 2);
+        assert(size - 1 - 2 * radius <= 0);
+    }
+    assert(82 - 1 - 2 * ui_glass_effective_radius(radius_circle, 82, 28) > 0);
     return 0;
 }

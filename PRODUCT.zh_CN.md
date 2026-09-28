@@ -56,8 +56,8 @@ Patterns、真机 Showcase 与可量化的性能测试。
 - 光学材质配置：`main/ui_glass_optics.*`。
 - RGB565 融合合成与脏区规划：`main/ui_glass_compositor.*` 和
   `main/liquid_glass_compositor_core.*`。
-- 三卡连续动效研究：`main/liquid_glass_motion.*` 与
-  `main/demo_liquid_glass.c`。
+- 连续动效研究与展示场景：`main/liquid_glass_motion.*` 与
+  `main/showcase_scenes.c`。
 - 仓库已有真机截图回采与显示遥测能力；没有真机采样时不得编造生产性能结论。
 
 ## 产品原则

@@ -35,7 +35,6 @@
     { "id": "slider", "category": "control", "status": "implemented", "api": "ui_glass_slider_create", "material": "opaque-content", "measurement": "pending-device" },
     { "id": "button", "category": "control", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
     { "id": "morph-menu", "category": "presentation", "status": "showcase", "api": "demo_glass_system", "material": "interactive-glass", "measurement": "pending-device" },
-    { "id": "dock", "category": "navigation", "status": "showcase", "api": "demo_glass_system", "material": "interactive-glass", "measurement": "pending-device" },
     { "id": "top-bar", "category": "navigation", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
     { "id": "icon-button", "category": "control", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },
     { "id": "segmented-control", "category": "control", "status": "showcase", "api": "demo_glass_system", "measurement": "pending-device" },

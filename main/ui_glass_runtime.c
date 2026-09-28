@@ -10,6 +10,13 @@ static void apply_quality(ui_glass_runtime_t *runtime)
     const ui_glass_quality_profile_t *profile =
         ui_glass_quality_profile(runtime->quality.level);
     lv_timer_set_period(runtime->refresh_timer, profile->refresh_period_ms);
+    // LVGL steps every animation on its own timer, which starts at
+    // LV_DEF_REFR_PERIOD. A faster display refresh alone only redraws the
+    // same animation state, so both timers follow the quality tier.
+    lv_timer_t *animation_timer = lv_anim_get_timer();
+    if (animation_timer) {
+        lv_timer_set_period(animation_timer, profile->refresh_period_ms);
+    }
 }
 
 bool ui_glass_runtime_init(ui_glass_runtime_t *runtime,
@@ -43,6 +50,10 @@ void ui_glass_runtime_deinit(ui_glass_runtime_t *runtime)
     if (!runtime) return;
     if (runtime->refresh_timer) {
         lv_timer_set_period(runtime->refresh_timer, LV_DEF_REFR_PERIOD);
+        lv_timer_t *animation_timer = lv_anim_get_timer();
+        if (animation_timer) {
+            lv_timer_set_period(animation_timer, LV_DEF_REFR_PERIOD);
+        }
     }
     if (runtime->screen) lv_obj_delete(runtime->screen);
     memset(runtime, 0, sizeof(*runtime));

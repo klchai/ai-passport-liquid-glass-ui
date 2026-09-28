@@ -3,11 +3,14 @@
 // Average colors from a narrow center strip of the embedded wallpaper. The
 // edge renderer interpolates this tiny LUT instead of retaining or reading a
 // framebuffer, so a lens rim can still borrow plausible displaced color.
+// tools/build_liquid_glass_wallpaper.py prints these rows when it rebuilds
+// the wallpaper, and its --check-samples mode (run by validate.sh) fails if
+// they no longer match the asset.
 static const uint32_t WALLPAPER_CENTER_SAMPLES[] = {
-    0xB0CBD7u, 0xB3CDD8u, 0xA2C9D8u, 0x3F8DC4u, 0x033580u,
-    0x011345u, 0x010E2Eu, 0x01102Eu, 0x011537u, 0x011B3Eu,
-    0x082240u, 0x12233Bu, 0x0F1A2Bu, 0x0A1223u, 0x0A1325u,
-    0x09182Fu, 0x060D1Eu, 0x050B1Bu, 0x09294Bu, 0x042B53u,
+    0x101113u, 0x131416u, 0x151719u, 0x181A1Du, 0x1C1E21u,
+    0x202124u, 0x222327u, 0x202125u, 0x2B2D31u, 0x292A2Eu,
+    0x27292Du, 0x27282Cu, 0x242529u, 0x575A5Fu, 0x404247u,
+    0x37393Eu, 0x313337u, 0x73757Au, 0x4D5055u, 0x44464Au,
 };
 
 ui_glass_optics_t ui_glass_optics_for_material(ui_glass_material_t material)
@@ -101,4 +104,15 @@ int16_t ui_glass_glint_center(int32_t progress, int16_t left, int16_t right)
 {
     int32_t width = (int32_t)right - left;
     return (int16_t)(left + (width * progress) / UI_GLASS_ANIM_PROGRESS_MAX);
+}
+
+int16_t ui_glass_effective_radius(int16_t radius, int16_t width,
+                                  int16_t height)
+{
+    // Same rule as LVGL's `short_side >> 1` clamp. The radius is only compared,
+    // never added to or doubled, so LV_RADIUS_CIRCLE cannot overflow int16_t.
+    int16_t short_side = width < height ? width : height;
+    if (short_side <= 0 || radius <= 0) return 0;
+    int16_t limit = (int16_t)(short_side / 2);
+    return radius < limit ? radius : limit;
 }

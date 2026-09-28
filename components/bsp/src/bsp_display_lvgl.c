@@ -10,7 +10,7 @@
 
 #include <inttypes.h>
 
-#define LVGL_DRAW_BUFFER_LINES 20
+#define LVGL_DRAW_BUFFER_LINES 32
 #define PERF_REPORT_PERIOD_US  (1 * 1000 * 1000)
 
 static const char *TAG = "bsp_lvgl";
@@ -235,8 +235,14 @@ lv_display_t *bsp_lvgl_init(void) {
         .panel_handle = bsp_display_panel(),
         .io_handle    = bsp_display_io(),
         // ⚠ C3 无 PSRAM,DMA 只能用内部 RAM。
-        // 两个 20 行缓冲共 19.2KB，允许 CPU 合成下一条带时并行发送上一条带；
-        // 不使用曾导致 I2S 等外设 NO_MEM 的 40 行双缓冲(≈38.4KB)。
+        // 两个 32 行缓冲共 30KB(2 x 240 x 32 x 2 字节)，允许 CPU 合成下一条带时
+        // 并行发送上一条带。比 20 行多占 11.5KB，但全屏一帧从 16 个条带减到 10 个，
+        // 逐条带的固定开销(遍历对象树、合成器回调、每次 flush 的 CASET/RASET/RAMWR
+        // 命令)随之减少，主机仿真中各页渲染指令数少 7%~14%。仍不使用曾导致 I2S 等
+        // 外设 NO_MEM 的 40 行双缓冲(≈38.4KB)。上次实机记录(音频、BLE、LVGL 全部
+        // 运行)为空闲堆 136336、最大块 114688 字节，此后 LVGL 静态池又从 24KB 增到
+        // 48KB，推算改为 32 行后空闲堆约 100KB。调整行数后须在实机确认 I2S 与 BLE
+        // 初始化无 NO_MEM，并记录空闲堆与最大块。
         .buffer_size   = (uint32_t)BSP_LCD_W * LVGL_DRAW_BUFFER_LINES,
         .double_buffer = true,
         .hres = BSP_LCD_W, .vres = BSP_LCD_H,
