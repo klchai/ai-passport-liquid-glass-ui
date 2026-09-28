@@ -2,6 +2,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "src/misc/lv_area_private.h"
 
 #include <stdbool.h>
 #include <string.h>
